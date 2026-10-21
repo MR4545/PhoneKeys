@@ -10,6 +10,8 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -21,6 +23,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import java.util.concurrent.Executor
 
@@ -28,6 +31,9 @@ class MainActivity : Activity() {
 
     private lateinit var statusText: TextView
     private lateinit var textToSend: EditText
+    private lateinit var speedLabel: TextView
+    private var typingIntervalMs = 35L
+    private var isSendingText = false
     private var hidDevice: BluetoothHidDevice? = null
     private var registered = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -75,84 +81,163 @@ class MainActivity : Activity() {
     }
 
     private fun buildInterface() {
-        val root = LinearLayout(this).apply {
+        val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(18, 18, 18, 18)
-            setBackgroundColor(Color.rgb(18, 22, 32))
+            setPadding(dp(16), dp(16), dp(16), dp(22))
+            setBackgroundColor(Color.rgb(12, 15, 25))
         }
-        val scroll = ScrollView(this)
-        scroll.addView(root)
+        val scroll = ScrollView(this).apply { isFillViewport = true }
+        scroll.addView(page)
 
-        val heading = TextView(this).apply {
-            text = "PhoneKeys"
-            textSize = 28f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 8)
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            background = rounded(Color.rgb(25, 31, 49), 22)
         }
-        root.addView(heading)
+        val brand = TextView(this).apply {
+            text = "PHONEKEYS  /  BT HID"
+            textSize = 12f
+            letterSpacing = 0.12f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(105, 232, 220))
+        }
+        header.addView(brand)
+        header.addView(TextView(this).apply {
+            text = "Your phone. Your keyboard."
+            textSize = 24f
+            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            setPadding(0, dp(7), 0, dp(5))
+        })
         statusText = TextView(this).apply {
             text = "Starting PhoneKeys..."
-            textSize = 14f
-            setTextColor(Color.rgb(150, 220, 255))
-            setPadding(0, 0, 0, 12)
+            textSize = 13f
+            setTextColor(Color.rgb(180, 194, 220))
         }
-        root.addView(statusText)
+        header.addView(statusText)
+        page.addView(header, marginParams(bottom = 12))
 
-        addActionButton(root, "Register keyboard") { registerKeyboard() }
-        addActionButton(root, "Unregister keyboard") { unregisterKeyboard() }
-        addSectionTitle(root, "TYPE A MESSAGE")
+        val connectRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        connectRow.addView(actionButton("Register", true) { registerKeyboard() }, weightedParams(1f, end = 5))
+        connectRow.addView(actionButton("Unregister", false) { unregisterKeyboard() }, weightedParams(1f, start = 5))
+        page.addView(connectRow, marginParams(bottom = 14))
+
+        addSectionTitle(page, "SEND TEXT", "Paste a message and send it to the connected computer.")
         textToSend = EditText(this).apply {
-            hint = "Paste or type text here..."
-            setHintTextColor(Color.GRAY)
-            setTextColor(Color.BLACK)
+            hint = "Tap here to type or paste…"
+            setHintTextColor(Color.rgb(119, 130, 153))
+            setTextColor(Color.rgb(25, 30, 43))
             textSize = 16f
             minLines = 3
-            maxLines = 7
+            maxLines = 6
             gravity = Gravity.TOP or Gravity.START
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            setPadding(12, 12, 12, 12)
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            background = rounded(Color.rgb(239, 243, 250), 16)
         }
-        root.addView(textToSend, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        addActionButton(root, "SEND ENTIRE TEXT TO PC") { sendText(textToSend.text.toString()) }
-        addSectionTitle(root, "ON-SCREEN KEYBOARD")
-        addKeyRow(root, listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"))
-        addKeyRow(root, listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"))
-        addKeyRow(root, listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"))
-        addKeyRow(root, listOf("⇧", "z", "x", "c", "v", "b", "n", "m", "⌫"))
-        addKeyRow(root, listOf("@", "#", "$", "%", "^", "&", "*", "(", ")"))
-        addKeyRow(root, listOf("-", "_", "=", "+", "[", "]", "{", "}"))
-        addKeyRow(root, listOf("\\", "|", ";", ":", "'", "\"", "`", "~"))
-        addKeyRow(root, listOf(".", ",", "<", ">", "/", "?", "!"))
-        addKeyRow(root, listOf("Tab", "Space", "Enter"))
-        addActionButton(root, "Backspace") { sendSpecial(0x2A) }
-        addActionButton(root, "Clear message") { textToSend.setText("") }
-        val note = TextView(this).apply {
-            text = "Connect PhoneKeys to your computer over Bluetooth first. Paste text into the box, then tap SEND. The symbol rows include common punctuation and Shift-based symbols. Bluetooth HID sends key presses, so support for symbols depends on your computer's keyboard layout. Emoji and many Unicode characters (such as ₹, é, and non-Latin scripts) cannot be sent directly by this basic HID layout."
+        page.addView(textToSend, marginParams(bottom = 9))
+        page.addView(actionButton("SEND TO PC  →", true) { sendText(textToSend.text.toString()) }, marginParams(bottom = 12))
+
+        val speedCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(10))
+            background = rounded(Color.rgb(25, 31, 49), 17)
+        }
+        val speedTop = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        speedTop.addView(TextView(this).apply {
+            text = "TEXT SPEED"
             textSize = 12f
-            setTextColor(Color.LTGRAY)
-            setPadding(0, 14, 0, 8)
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.08f
+            setTextColor(Color.rgb(173, 187, 215))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        speedLabel = TextView(this).apply {
+            text = "VERY FAST · 35 ms"
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(105, 232, 220))
         }
-        root.addView(note)
+        speedTop.addView(speedLabel)
+        speedCard.addView(speedTop)
+        val speedSeek = SeekBar(this).apply {
+            max = 175 // 25–200 ms between characters
+            progress = 10 // 35 ms default
+            progressTintList = android.content.res.ColorStateList.valueOf(Color.rgb(105, 232, 220))
+            thumbTintList = android.content.res.ColorStateList.valueOf(Color.rgb(105, 232, 220))
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(66, 77, 103))
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    typingIntervalMs = (progress + 25).toLong()
+                    val label = when {
+                        typingIntervalMs <= 35 -> "VERY FAST"
+                        typingIntervalMs <= 60 -> "FAST"
+                        typingIntervalMs <= 110 -> "NORMAL"
+                        else -> "SLOW / SAFE"
+                    }
+                    speedLabel.text = "$label · ${typingIntervalMs} ms"
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        speedCard.addView(speedSeek)
+        speedCard.addView(TextView(this).apply {
+            text = "Lower delay = faster typing. If letters are missed, move the slider to the right."
+            textSize = 12f
+            setTextColor(Color.rgb(151, 164, 190))
+        })
+        page.addView(speedCard, marginParams(bottom = 18))
+
+        addSectionTitle(page, "ON-SCREEN KEYBOARD", "Tap a key to send it directly over Bluetooth.")
+        addKeyRow(page, listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"))
+        addKeyRow(page, listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"))
+        addKeyRow(page, listOf("a", "s", "d", "f", "g", "h", "j", "k", "l"))
+        addKeyRow(page, listOf("⇧", "z", "x", "c", "v", "b", "n", "m", "⌫"))
+        addKeyRow(page, listOf("@", "#", "\$", "%", "^", "&", "*", "(", ")"))
+        addKeyRow(page, listOf("-", "_", "=", "+", "[", "]", "{", "}"))
+        addKeyRow(page, listOf("\\", "|", ";", ":", "'", "\"", "`", "~"))
+        addKeyRow(page, listOf(".", ",", "<", ">", "/", "?", "!"))
+        addKeyRow(page, listOf("Tab", "Space", "Enter"))
+        page.addView(actionButton("CLEAR TEXT", false) { textToSend.setText("") }, marginParams(top = 8, bottom = 10))
+        page.addView(TextView(this).apply {
+            text = "Note: symbol output depends on your computer's keyboard layout. Basic Bluetooth HID cannot directly send emoji or many Unicode characters."
+            textSize = 12f
+            setTextColor(Color.rgb(132, 145, 171))
+            setPadding(dp(2), dp(5), dp(2), dp(4))
+        })
         setContentView(scroll)
     }
 
-    private fun addSectionTitle(parent: LinearLayout, title: String) {
+    private fun addSectionTitle(parent: LinearLayout, title: String, subtitle: String) {
         parent.addView(TextView(this).apply {
             text = title
-            textSize = 13f
-            setTextColor(Color.rgb(120, 200, 255))
-            setPadding(0, 18, 0, 8)
+            textSize = 12f
+            letterSpacing = 0.12f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.rgb(105, 232, 220))
+            setPadding(dp(2), dp(2), 0, dp(4))
+        })
+        parent.addView(TextView(this).apply {
+            text = subtitle
+            textSize = 12f
+            setTextColor(Color.rgb(139, 151, 177))
+            setPadding(dp(2), 0, 0, dp(9))
         })
     }
 
-    private fun addActionButton(parent: LinearLayout, label: String, action: () -> Unit) {
-        val button = Button(this).apply {
+    private fun actionButton(label: String, primary: Boolean, action: () -> Unit): Button {
+        return Button(this).apply {
             text = label
             isAllCaps = false
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(if (primary) Color.rgb(12, 25, 33) else Color.rgb(220, 229, 245))
+            background = rounded(if (primary) Color.rgb(105, 232, 220) else Color.rgb(40, 48, 70), 14)
+            minHeight = dp(48)
+            stateListAnimator = null
+            setPadding(dp(10), dp(8), dp(10), dp(8))
             setOnClickListener { action() }
         }
-        parent.addView(button, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
 
     private fun addKeyRow(parent: LinearLayout, keys: List<String>) {
@@ -161,37 +246,57 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
         keys.forEach { key ->
-            val label = when (key) { "Space" -> "Space"; "Enter" -> "Enter"; "Tab" -> "Tab"; else -> key }
+            val special = key.length > 1 || key == "⇧" || key == "⌫"
             val button = Button(this).apply {
-                text = label
+                text = key
                 isAllCaps = false
-                textSize = if (key.length > 1) 10f else 14f
+                textSize = if (special) 11f else 15f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(if (special) Color.rgb(105, 232, 220) else Color.rgb(237, 242, 252))
+                background = rounded(if (special) Color.rgb(38, 52, 72) else Color.rgb(30, 38, 57), 10)
                 setPadding(0, 0, 0, 0)
                 minWidth = 0
+                minHeight = dp(46)
+                stateListAnimator = null
                 setOnClickListener {
                     when (key) {
-                        "⇧" -> { shiftNext = !shiftNext; updateStatus(if (shiftNext) "Shift enabled for next letter." else "Shift off.") }
+                        "⇧" -> { shiftNext = !shiftNext; updateStatus(if (shiftNext) "Shift enabled for next key." else "Shift off.") }
                         "⌫" -> sendSpecial(0x2A)
                         "Space" -> sendSpecial(0x2C)
                         "Enter" -> sendSpecial(0x28)
                         "Tab" -> sendSpecial(0x2B)
                         else -> {
-                            val character = if (shiftNext) key.uppercase() else key
+                            val character = if (shiftNext && key.length == 1 && key[0] in 'a'..'z') key.uppercase() else key
                             sendCharacter(character.first())
                             shiftNext = false
                         }
                     }
                 }
             }
-            val weight = if (key == "Space") 4f else if (key.length > 1) 1.8f else 1f
-            val params = LinearLayout.LayoutParams(0, 48, weight)
-            params.setMargins(2, 2, 2, 2)
+            val weight = when (key) { "Space" -> 4f; "Enter", "Tab", "⇧", "⌫" -> 1.7f; else -> 1f }
+            val params = LinearLayout.LayoutParams(0, dp(46), weight)
+            params.setMargins(dp(2), dp(2), dp(2), dp(2))
             row.addView(button, params)
         }
         parent.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
 
-    private var shiftNext = false
+    private fun rounded(color: Int, radiusDp: Int): GradientDrawable = GradientDrawable().apply {
+        setColor(color)
+        cornerRadius = dp(radiusDp).toFloat()
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun marginParams(top: Int = 0, bottom: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(0, dp(top), 0, dp(bottom))
+        }
+
+    private fun weightedParams(weight: Float, start: Int = 0, end: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight).apply {
+            setMargins(dp(start), 0, dp(end), 0)
+        }
 
     private fun initializeBluetooth() {
         try {
@@ -249,6 +354,7 @@ class MainActivity : Activity() {
 
     private fun sendText(text: String) {
         if (text.isEmpty()) { updateStatus("Type or paste some text first."); return }
+        if (isSendingText) { updateStatus("Text is already being sent. Wait for it to finish."); return }
         val target = getConnectedPc() ?: return
         val chars = text.toList()
         val supported = chars.mapNotNull { ch ->
@@ -259,22 +365,33 @@ class MainActivity : Activity() {
             }
         }
         if (supported.isEmpty()) { updateStatus("No supported characters found."); return }
-        updateStatus("Typing ${supported.size} keystrokes on the PC...")
+        val interval = typingIntervalMs.coerceAtLeast(25L)
+        val releaseDelay = minOf(18L, interval - 2L).coerceAtLeast(8L)
         val hid = hidDevice ?: return
+        isSendingText = true
+        updateStatus("Typing ${supported.size} keystrokes · ${interval} ms interval…")
         supported.forEachIndexed { index, key ->
-            val start = index * 95L
             mainHandler.postDelayed({
                 try {
                     val pressed = byteArrayOf(key.second.toByte(), 0, key.first.toByte(), 0, 0, 0, 0, 0)
-                    hid.sendReport(target, 0, pressed)
-                    mainHandler.postDelayed({ try { hid.sendReport(target, 0, ByteArray(8)) } catch (_: Exception) {} }, 35L)
-                    if (index == supported.lastIndex) mainHandler.postDelayed({ updateStatus("Finished sending text.") }, 50L)
-                } catch (e: Exception) { updateStatus("Text send interrupted: ${e.message}") }
-            }, start)
+                    val sent = hid.sendReport(target, 0, pressed)
+                    if (!sent) updateStatus("PC rejected a key report. Try a slower speed.")
+                    mainHandler.postDelayed({
+                        try { hid.sendReport(target, 0, ByteArray(8)) } catch (_: Exception) { }
+                        if (index == supported.lastIndex) {
+                            isSendingText = false
+                            val skipped = chars.size - supported.size
+                            updateStatus(if (skipped > 0) "Finished. Skipped $skipped unsupported character(s)." else "Finished sending text!")
+                        }
+                    }, releaseDelay)
+                } catch (e: Exception) {
+                    isSendingText = false
+                    updateStatus("Text send interrupted: ${e.message}")
+                }
+            }, index * interval)
         }
         if (supported.size < chars.size) {
-            val skipped = chars.size - supported.size
-            updateStatus("Sending text; $skipped unsupported character(s), such as emoji or Unicode symbols, will be skipped.")
+            updateStatus("Sending text; unsupported emoji/Unicode characters will be skipped.")
         }
     }
 
