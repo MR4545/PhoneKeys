@@ -70,6 +70,7 @@ class MainActivity : Activity() {
     private val callback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
             this@MainActivity.registered = registered
+            keyboardRegistered = registered
             if (registered) {
                 updateStatus("PhoneKeys keyboard registered. Connect a computer or compatible Android phone in Bluetooth settings.")
                 requestHostDiscoverability()
@@ -95,7 +96,8 @@ class MainActivity : Activity() {
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hidDevice = proxy as BluetoothHidDevice
-                updateStatus("Bluetooth HID available. Tap Register keyboard.")
+                registered = keyboardRegistered
+                updateStatus(if (registered) "Bluetooth HID available. Keyboard session is active in the background." else "Bluetooth HID available. Tap Register keyboard.")
             }
         }
 
@@ -103,7 +105,8 @@ class MainActivity : Activity() {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hidDevice = null
                 registered = false
-                updateStatus("Bluetooth HID service disconnected.")
+                keyboardRegistered = false
+                updateStatus("Bluetooth HID service disconnected. Reopen PhoneKeys and register again if needed.")
             }
         }
     }
@@ -490,6 +493,7 @@ class MainActivity : Activity() {
         val hid = hidDevice
         if (hid == null) { updateStatus("HID service is not ready. Restart the app."); return }
         try {
+            startKeyboardForegroundService()
             val settings = BluetoothHidDeviceAppSdpSettings("PhoneKeys", "PhoneKeys Bluetooth Keyboard", "PhoneKeys", BluetoothHidDevice.SUBCLASS1_KEYBOARD, KEYBOARD_DESCRIPTOR)
             val executor = Executor { command -> runOnUiThread { command.run() } }
             val accepted = hid.registerApp(settings, null, null, executor, callback)
@@ -498,10 +502,23 @@ class MainActivity : Activity() {
         catch (e: Exception) { updateStatus("Registration error: ${e.message}") }
     }
 
+    private fun startKeyboardForegroundService() {
+        try {
+            val intent = android.content.Intent(this, KeyboardKeepAliveService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+        } catch (e: Exception) {
+            updateStatus("Could not start background keyboard service: ${e.message}")
+        }
+    }
+
     private fun unregisterKeyboard() {
         try {
             val hid = hidDevice ?: run { updateStatus("HID service is not ready."); return }
-            hid.unregisterApp(); registered = false; updateStatus("Unregister requested.")
+            hid.unregisterApp()
+            registered = false
+            keyboardRegistered = false
+            stopService(android.content.Intent(this, KeyboardKeepAliveService::class.java))
+            updateStatus("Keyboard unregistered. Background keyboard service stopped.")
         } catch (e: Exception) { updateStatus("Unregister error: ${e.message}") }
     }
 
@@ -684,17 +701,14 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        try {
-            val hid = hidDevice
-            if (hid != null) {
-                if (registered) hid.unregisterApp()
-                (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, hid)
-            }
-        } catch (_: Exception) { }
+        // Do not unregister HID or close the profile proxy here. Android can destroy
+        // the Activity while the user switches apps; the foreground service keeps the
+        // keyboard session alive until the user explicitly taps Unregister.
         super.onDestroy()
     }
 
     companion object {
+        @Volatile private var keyboardRegistered = false
         private const val REQUEST_BLUETOOTH = 100
         private const val REQUEST_ADVERTISE = 101
         private val KEYBOARD_DESCRIPTOR = intArrayOf(
