@@ -41,6 +41,9 @@ class MainActivity : Activity() {
     private lateinit var inputPages: ViewFlipper
     private var activeInputPage = 0
     private var liveInputReady = false
+    private var livePreviousText = ""
+    private val liveKeyQueue = java.util.ArrayDeque<Pair<Int, Int>>()
+    private var liveKeySending = false
     private lateinit var speedLabel: TextView
     private var typingIntervalMs = 35L
     private var suppressInputWatcher = false
@@ -62,14 +65,14 @@ class MainActivity : Activity() {
     private val callback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
             this@MainActivity.registered = registered
-            updateStatus(if (registered) "Keyboard registered. Connect your PC." else "Keyboard is not registered.")
+            updateStatus(if (registered) "Keyboard registered. Connect a computer or compatible phone." else "Keyboard is not registered.")
         }
 
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
             when (state) {
-                BluetoothProfile.STATE_CONNECTED -> updateStatus("Connected to PC. Ready to type!")
-                BluetoothProfile.STATE_CONNECTING -> updateStatus("Connecting to PC...")
-                BluetoothProfile.STATE_DISCONNECTED -> updateStatus("Disconnected. Register and reconnect.")
+                BluetoothProfile.STATE_CONNECTED -> updateStatus("Connected to a host device. Ready to type!")
+                BluetoothProfile.STATE_CONNECTING -> updateStatus("Connecting to host device...")
+                BluetoothProfile.STATE_DISCONNECTED -> updateStatus("Host disconnected. Reconnect to a computer or phone.")
                 else -> updateStatus("Bluetooth state: $state")
             }
         }
@@ -223,7 +226,7 @@ class MainActivity : Activity() {
         }
         livePage.addView(liveSwipeHint)
         livePage.addView(TextView(this).apply {
-            text = "Tap the box, use your regular phone keyboard, and each typed character goes straight to the PC. No send button."
+            text = "Type with your regular phone keyboard. Changes are sent live to the connected computer or phone that supports Bluetooth keyboards."
             textSize = 12f
             setTextColor(Color.rgb(139, 151, 177))
             setPadding(dp(2), 0, 0, dp(9))
@@ -241,30 +244,48 @@ class MainActivity : Activity() {
             background = rounded(Color.rgb(239, 243, 250), 16)
         }
         liveTextInput.setText(previousLiveDraft)
+        livePreviousText = previousLiveDraft
         liveInputReady = false
         liveTextInput.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
+                livePreviousText = s?.toString() ?: livePreviousText
+            }
+
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                if (!liveInputReady || s == null || isSendingText) return
-                if (count > 0 && before == 0) {
-                    val inserted = s.subSequence(start, start + count).toString()
-                    if (inserted.length == 1) {
-                        val ch = inserted[0]
-                        if (ch == '\n' || ch == '\r') sendSpecial(0x28) else sendCharacter(ch)
-                    } else {
-                        // Multi-character insertion/paste in Live Input is intentionally sent immediately.
-                        sendText(inserted)
+                if (s == null) return
+                val oldText = livePreviousText
+                val newText = s.toString()
+                livePreviousText = newText
+                if (!liveInputReady) return
+
+                // Diff old/new text instead of relying on count > 0 && before == 0.
+                // Soft keyboards often replace composing text, so that old condition
+                // ignored most letters after the first one.
+                var prefix = 0
+                while (prefix < oldText.length && prefix < newText.length && oldText[prefix] == newText[prefix]) prefix++
+                var suffix = 0
+                while (suffix < oldText.length - prefix && suffix < newText.length - prefix &&
+                    oldText[oldText.length - 1 - suffix] == newText[newText.length - 1 - suffix]) suffix++
+
+                val removedCount = oldText.length - prefix - suffix
+                val inserted = newText.substring(prefix, newText.length - suffix)
+                repeat(removedCount) { sendSpecial(0x2A) }
+                inserted.forEach { ch ->
+                    when (ch) {
+                        '\n', '\r' -> sendSpecial(0x28)
+                        '\t' -> sendSpecial(0x2B)
+                        else -> sendCharacter(ch)
                     }
-                } else if (count == 0 && before == 1) {
-                    sendSpecial(0x2A)
                 }
             }
+
             override fun afterTextChanged(s: Editable?) {}
         })
         livePage.addView(liveTextInput, marginParams(bottom = 9))
         livePage.addView(actionButton("CLEAR LIVE BOX", false) {
             liveInputReady = false
             liveTextInput.setText("")
+            livePreviousText = ""
             liveInputReady = true
         }, marginParams(bottom = 14))
         inputPages.addView(livePage)
@@ -469,12 +490,54 @@ class MainActivity : Activity() {
         } catch (e: Exception) { updateStatus("Unregister error: ${e.message}") }
     }
 
-    private fun sendSpecial(keyCode: Int, modifier: Int = 0) = sendReportStroke(keyCode, modifier)
+    // Live keystrokes are queued so a key-release report from one character cannot
+    // accidentally arrive after the next character's key-down report.
+    private fun sendSpecial(keyCode: Int, modifier: Int = 0) {
+        enqueueLiveKey(keyCode, modifier)
+    }
 
     private fun sendCharacter(character: Char) {
         val pair = keyForCharacter(character)
-        if (pair == null) { updateStatus("Character '$character' is not supported by the basic keyboard layout."); return }
-        sendReportStroke(pair.first, if (pair.second) 0x02 else 0)
+        if (pair == null) {
+            updateStatus("Character '$character' is not supported by the basic keyboard layout.")
+            return
+        }
+        enqueueLiveKey(pair.first, if (pair.second) 0x02 else 0)
+    }
+
+    private fun enqueueLiveKey(keyCode: Int, modifier: Int = 0) {
+        if (getConnectedPc() == null) return
+        liveKeyQueue.addLast(Pair(keyCode, modifier))
+        drainLiveKeyQueue()
+    }
+
+    private fun drainLiveKeyQueue() {
+        if (liveKeySending || liveKeyQueue.isEmpty()) return
+        val target = getConnectedPc() ?: run { liveKeyQueue.clear(); return }
+        val hid = hidDevice ?: run { liveKeyQueue.clear(); return }
+        val (keyCode, modifier) = liveKeyQueue.removeFirst()
+        liveKeySending = true
+        try {
+            val pressed = byteArrayOf(modifier.toByte(), 0, keyCode.toByte(), 0, 0, 0, 0, 0)
+            if (!hid.sendReport(target, 0, pressed)) {
+                updateStatus("Host rejected a key report. Reconnect or try a slower speed.")
+            }
+            val interval = typingIntervalMs.coerceAtLeast(25L)
+            val releaseDelay = minOf(18L, interval - 2L).coerceAtLeast(8L)
+            mainHandler.postDelayed({
+                try { hid.sendReport(target, 0, ByteArray(8)) } catch (_: Exception) { }
+                mainHandler.postDelayed({
+                    liveKeySending = false
+                    drainLiveKeyQueue()
+                }, (interval - releaseDelay).coerceAtLeast(1L))
+            }, releaseDelay)
+        } catch (e: SecurityException) {
+            liveKeySending = false
+            updateStatus("Bluetooth permission denied.")
+        } catch (e: Exception) {
+            liveKeySending = false
+            updateStatus("Live typing error: ${e.message}")
+        }
     }
 
     private fun sendReportStroke(keyCode: Int, modifier: Int = 0, delayMs: Long = 55L) {
@@ -512,7 +575,7 @@ class MainActivity : Activity() {
                 try {
                     val pressed = byteArrayOf(key.second.toByte(), 0, key.first.toByte(), 0, 0, 0, 0, 0)
                     val sent = hid.sendReport(target, 0, pressed)
-                    if (!sent) updateStatus("PC rejected a key report. Try a slower speed.")
+                    if (!sent) updateStatus("Host rejected a key report. Try a slower speed.")
                     mainHandler.postDelayed({
                         try { hid.sendReport(target, 0, ByteArray(8)) } catch (_: Exception) { }
                         if (index == supported.lastIndex) {
@@ -535,9 +598,9 @@ class MainActivity : Activity() {
     private fun getConnectedPc(): BluetoothDevice? {
         try {
             val hid = hidDevice
-            if (hid == null || !registered) { updateStatus("Register the keyboard first."); return null }
+            if (hid == null || !registered) { updateStatus("Register the keyboard first, then connect a computer or compatible phone."); return null }
             val pc = hid.connectedDevices.firstOrNull()
-            if (pc == null) { updateStatus("No connected PC. Pair/connect over Bluetooth."); return null }
+            if (pc == null) { updateStatus("No connected host. Pair a computer or a phone that supports Bluetooth keyboards."); return null }
             return pc
         } catch (e: SecurityException) { updateStatus("Bluetooth permission denied."); return null }
     }
