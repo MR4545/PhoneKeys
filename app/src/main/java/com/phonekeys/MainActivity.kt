@@ -1,3 +1,4 @@
+
 package com.phonekeys
 
 import android.Manifest
@@ -6,200 +7,390 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothHidDevice
 import android.bluetooth.BluetoothHidDeviceAppSdpSettings
+import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.view.Gravity
-import android.view.View
+import android.os.Handler
+import android.os.Looper
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import java.util.concurrent.Executor
 
 class MainActivity : Activity() {
-    private lateinit var status: TextView
-    private var hid: BluetoothHidDevice? = null
-    private var registered = false
-    private var host: BluetoothDevice? = null
 
-    private val executor = Executor { command -> runOnUiThread(command) }
+    private lateinit var statusText: TextView
+    private var hidDevice: BluetoothHidDevice? = null
+    private var registered = false
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val callback = object : BluetoothHidDevice.Callback() {
+
         override fun onAppStatusChanged(
             pluggedDevice: BluetoothDevice?,
-            registeredNow: Boolean
+            registered: Boolean
         ) {
-            registered = registeredNow
-            host = pluggedDevice
-            setStatus(
-                if (registeredNow) "HID app registered. Make this phone discoverable/pair it from Windows Bluetooth settings."
-                else "HID app is not registered. Check Bluetooth and try Register keyboard."
+            this@MainActivity.registered = registered
+            updateStatus(
+                if (registered) {
+                    "Keyboard registered. Pair/connect your PC."
+                } else {
+                    "Keyboard is not registered."
+                }
             )
         }
 
-        override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
-            if (state == BluetoothProfile.STATE_CONNECTED) {
-                host = device
-                setStatus("Connected to Windows. Tap a key below to test.")
-            } else if (state == BluetoothProfile.STATE_DISCONNECTED) {
-                host = null
-                setStatus(if (registered) "Registered; not connected to Windows yet." else "Disconnected.")
+        override fun onConnectionStateChanged(
+            device: BluetoothDevice?,
+            state: Int
+        ) {
+            when (state) {
+                BluetoothProfile.STATE_CONNECTED ->
+                    updateStatus("Connected to PC. Ready to type!")
+
+                BluetoothProfile.STATE_CONNECTING ->
+                    updateStatus("Connecting to PC...")
+
+                BluetoothProfile.STATE_DISCONNECTED ->
+                    updateStatus("Disconnected. Register and reconnect.")
+
+                else -> updateStatus("Bluetooth state: $state")
+            }
+        }
+    }
+
+    private val profileListener = object : BluetoothProfile.ServiceListener {
+
+        override fun onServiceConnected(
+            profile: Int,
+            proxy: BluetoothProfile
+        ) {
+            if (profile == BluetoothProfile.HID_DEVICE) {
+                hidDevice = proxy as BluetoothHidDevice
+                updateStatus("Bluetooth HID available. Tap Register keyboard.")
+            }
+        }
+
+        override fun onServiceDisconnected(profile: Int) {
+            if (profile == BluetoothProfile.HID_DEVICE) {
+                hidDevice = null
+                registered = false
+                updateStatus("Bluetooth HID service disconnected.")
             }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        buildUi()
-        if (Build.VERSION.SDK_INT >= 31 &&
-            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+
+        buildInterface()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) !=
+            PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 100)
+            requestPermissions(
+                arrayOf(Manifest.permission.BLUETOOTH_CONNECT),
+                REQUEST_BLUETOOTH
+            )
+        } else {
+            initializeBluetooth()
         }
     }
 
-    private fun buildUi() {
-        val outer = LinearLayout(this).apply {
+    private fun buildInterface() {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(12, 16, 12, 12)
-            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(28, 24, 28, 24)
         }
-        status = TextView(this).apply {
-            text = "PhoneKeys HID test\nTurn Bluetooth on, then register."
-            textSize = 16f
-            setPadding(8, 8, 8, 12)
+
+        val scroll = ScrollView(this)
+        scroll.addView(root)
+
+        statusText = TextView(this).apply {
+            text = "Starting PhoneKeys..."
+            textSize = 18f
+            setPadding(0, 0, 0, 20)
         }
-        outer.addView(status)
-        outer.addView(makeButton("Register keyboard") { registerHid() })
-        outer.addView(makeButton("Unregister keyboard") {
-            try {
-                hid?.unregisterApp()
-                registered = false
-                setStatus("Unregistered.")
-            } catch (e: Exception) {
-                setStatus("Unregister error: ${e.message}")
-            }
-        })
-        outer.addView(makeButton("Send A") { sendKey(0x04) })
-        outer.addView(makeButton("Send Enter") { sendKey(0x28) })
-        outer.addView(makeButton("Send Backspace") { sendKey(0x2A) })
-        outer.addView(makeButton("Send Space") { sendKey(0x2C) })
-        outer.addView(TextView(this).apply {
-            text = "Test prototype only. Clipboard and full keyboard layout are not included yet."
-            textSize = 13f
-            setPadding(8, 16, 8, 8)
-        })
-        setContentView(outer)
+        root.addView(statusText)
+
+        addButton(root, "Register keyboard") {
+            registerKeyboard()
+        }
+
+        addButton(root, "Unregister keyboard") {
+            unregisterKeyboard()
+        }
+
+        addButton(root, "Send A") {
+            sendKey(0x04)
+        }
+
+        addButton(root, "Send Enter") {
+            sendKey(0x28)
+        }
+
+        addButton(root, "Send Backspace") {
+            sendKey(0x2A)
+        }
+
+        addButton(root, "Send Space") {
+            sendKey(0x2C)
+        }
+
+        val note = TextView(this).apply {
+            text = "\nTest version: connect your PC over Bluetooth, " +
+                "then test these buttons in a text editor."
+            textSize = 14f
+        }
+        root.addView(note)
+
+        setContentView(scroll)
     }
 
-    private fun makeButton(label: String, action: () -> Unit): Button =
-        Button(this).apply {
+    private fun addButton(
+        parent: LinearLayout,
+        label: String,
+        action: () -> Unit
+    ) {
+        val button = Button(this).apply {
             text = label
             isAllCaps = false
             setOnClickListener { action() }
         }
 
-    private fun registerHid() {
-        val adapter = BluetoothAdapter.getDefaultAdapter()
-        if (adapter == null) {
-            setStatus("This phone reports no Bluetooth adapter.")
-            return
-        }
-        if (!adapter.isEnabled) {
-            setStatus("Turn Bluetooth on in Android Settings, then tap Register keyboard.")
-            return
-        }
-        if (Build.VERSION.SDK_INT >= 31 &&
-            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 100)
-            setStatus("Grant Nearby devices permission, then tap Register keyboard again.")
-            return
-        }
-        setStatus("Requesting Android Bluetooth HID service…")
-        val ok = adapter.getProfileProxy(this, object : BluetoothProfile.ServiceListener {
-            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                if (profile != BluetoothProfile.HID_DEVICE) {
-                    setStatus("Unexpected Bluetooth profile: $profile")
-                    return
-                }
-                hid = proxy as BluetoothHidDevice
-                try {
-                    val sdp = BluetoothHidDeviceAppSdpSettings(
-                        "PhoneKeys",
-                        "PhoneKeys Bluetooth keyboard test",
-                        "OpenAI",
-                        BluetoothHidDevice.SUBCLASS1_KEYBOARD,
-                        KEYBOARD_DESCRIPTOR
-                    )
-                    val accepted = hid?.registerApp(sdp, null, null, executor, callback) ?: false
-                    setStatus(
-                        if (accepted) "Registration request sent. Wait for the status callback."
-                        else "Android rejected the HID registration request. This may be blocked by the phone firmware."
-                    )
-                } catch (e: SecurityException) {
-                    setStatus("Bluetooth permission error: ${e.message}")
-                } catch (e: Exception) {
-                    setStatus("HID registration failed: ${e.javaClass.simpleName}: ${e.message}")
-                }
-            }
-
-            override fun onServiceDisconnected(profile: Int) {
-                hid = null
-                registered = false
-                host = null
-                setStatus("Bluetooth HID service disconnected.")
-            }
-        }, BluetoothProfile.HID_DEVICE)
-        if (!ok) setStatus("Could not request Bluetooth HID service. Firmware/API support may be unavailable.")
+        parent.addView(
+            button,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
     }
 
-    // USB HID keyboard report: modifier, reserved byte, six key slots.
-    private fun sendKey(usage: Int) {
-        val service = hid
-        val device = host
-        if (service == null || device == null || !registered) {
-            setStatus("Not connected yet. Register the keyboard and pair from Windows first.")
-            return
-        }
+    private fun initializeBluetooth() {
         try {
-            val pressed = byteArrayOf(0, 0, usage.toByte(), 0, 0, 0, 0, 0)
-            val released = ByteArray(8)
-            val first = service.sendReport(device, 0, pressed)
-            service.sendReport(device, 0, released)
-            setStatus(if (first) "Sent key usage $usage." else "Windows did not accept the key report.")
+            val manager =
+                getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+            val adapter: BluetoothAdapter? = manager.adapter
+
+            if (adapter == null) {
+                updateStatus("This device has no Bluetooth adapter.")
+                return
+            }
+
+            if (!adapter.isEnabled) {
+                updateStatus("Turn on Bluetooth in Android Settings.")
+                return
+            }
+
+            val success = adapter.getProfileProxy(
+                this,
+                profileListener,
+                BluetoothProfile.HID_DEVICE
+            )
+
+            if (!success) {
+                updateStatus("Could not request the HID service.")
+            } else {
+                updateStatus("Requesting Bluetooth HID service...")
+            }
+        } catch (e: SecurityException) {
+            updateStatus("Bluetooth permission is required.")
         } catch (e: Exception) {
-            setStatus("Send error: ${e.message}")
+            updateStatus("Bluetooth error: ${e.message}")
         }
     }
 
-    private fun setStatus(message: String) {
-        if (::status.isInitialized) status.text = message
+    private fun registerKeyboard() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(Manifest.permission.BLUETOOTH_CONNECT),
+                REQUEST_BLUETOOTH
+            )
+            return
+        }
+
+        val hid = hidDevice
+
+        if (hid == null) {
+            updateStatus("HID service is not ready. Restart the app.")
+            return
+        }
+
+        try {
+            val settings = BluetoothHidDeviceAppSdpSettings(
+                "PhoneKeys",
+                "PhoneKeys Bluetooth Keyboard",
+                "PhoneKeys",
+                BluetoothHidDevice.SUBCLASS1_KEYBOARD,
+                KEYBOARD_DESCRIPTOR
+            )
+
+            val executor = Executor { command ->
+                runOnUiThread { command.run() }
+            }
+
+            val accepted = hid.registerApp(
+                settings,
+                null,
+                null,
+                executor,
+                callback
+            )
+
+            updateStatus(
+                if (accepted) {
+                    "Registration requested. Waiting for Android..."
+                } else {
+                    "Android rejected the registration request."
+                }
+            )
+        } catch (e: SecurityException) {
+            updateStatus("Bluetooth permission denied.")
+        } catch (e: Exception) {
+            updateStatus("Registration error: ${e.message}")
+        }
+    }
+
+    private fun unregisterKeyboard() {
+        try {
+            val hid = hidDevice
+
+            if (hid == null) {
+                updateStatus("HID service is not ready.")
+                return
+            }
+
+            hid.unregisterApp()
+            registered = false
+            updateStatus("Unregister requested.")
+        } catch (e: Exception) {
+            updateStatus("Unregister error: ${e.message}")
+        }
+    }
+
+    private fun sendKey(keyCode: Int) {
+        try {
+            val hid = hidDevice
+
+            if (hid == null || !registered) {
+                updateStatus("Register the keyboard first.")
+                return
+            }
+
+            val devices = hid.connectedDevices
+            val pc = devices.firstOrNull()
+
+            if (pc == null) {
+                updateStatus("No connected PC. Pair/connect over Bluetooth.")
+                return
+            }
+
+            val pressed = byteArrayOf(
+                0x00,
+                0x00,
+                keyCode.toByte(),
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00
+            )
+
+            val released = ByteArray(8)
+
+            val sent = hid.sendReport(pc, 0, pressed)
+
+            if (!sent) {
+                updateStatus("Android could not send the key.")
+                return
+            }
+
+            mainHandler.postDelayed({
+                try {
+                    hid.sendReport(pc, 0, released)
+                } catch (_: Exception) {
+                    updateStatus("Key release failed. Reconnect and retry.")
+                }
+            }, 60L)
+
+            updateStatus("Key sent.")
+        } catch (e: SecurityException) {
+            updateStatus("Bluetooth permission denied.")
+        } catch (e: Exception) {
+            updateStatus("Send error: ${e.message}")
+        }
+    }
+
+    private fun updateStatus(message: String) {
+        if (::statusText.isInitialized) {
+            statusText.text = message
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
+        )
+
+        if (requestCode == REQUEST_BLUETOOTH) {
+            if (grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            ) {
+                initializeBluetooth()
+            } else {
+                updateStatus("Bluetooth permission was not granted.")
+            }
+        }
     }
 
     override fun onDestroy() {
-        // Keep HID registration managed by Android's foreground registration rules;
-        // do not unregister here while testing the visible activity.
+        try {
+            val hid = hidDevice
+            if (hid != null) {
+                if (registered) {
+                    hid.unregisterApp()
+                }
+                (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager)
+                    .adapter
+                    ?.closeProfileProxy(BluetoothProfile.HID_DEVICE, hid)
+            }
+        } catch (_: Exception) {
+            // The activity may be closing while Bluetooth disconnects.
+        }
+
         super.onDestroy()
     }
 
     companion object {
-        // Standard HID boot keyboard report descriptor.
-       
-    private val KEYBOARD_DESCRIPTOR = intArrayOf(
-    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
-    0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,
-    0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
-    0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01,
-    0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05,
-    0x91, 0x02, 0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
-    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07,
-    0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xC0
-).map { it.toByte() }.toByteArray()
+        private const val REQUEST_BLUETOOTH = 100
 
-        )
+        private val KEYBOARD_DESCRIPTOR = intArrayOf(
+            0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
+            0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,
+            0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
+            0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01,
+            0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01,
+            0x29, 0x05, 0x91, 0x02, 0x95, 0x01, 0x75, 0x03,
+            0x91, 0x01, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00,
+            0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65,
+            0x81, 0x00, 0xC0
+        ).map { it.toByte() }.toByteArray()
     }
 }
+
