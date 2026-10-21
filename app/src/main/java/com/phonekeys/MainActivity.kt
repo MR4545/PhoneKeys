@@ -34,6 +34,7 @@ class MainActivity : Activity() {
     private lateinit var speedLabel: TextView
     private var typingIntervalMs = 35L
     private var isSendingText = false
+    private var shiftNext = false
     private var hidDevice: BluetoothHidDevice? = null
     private var registered = false
     private val mainHandler = Handler(Looper.getMainLooper())
