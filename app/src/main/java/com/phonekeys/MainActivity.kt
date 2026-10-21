@@ -20,6 +20,10 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.text.Editable
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.widget.FrameLayout
+import android.widget.ViewFlipper
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
@@ -32,11 +36,14 @@ import java.util.concurrent.Executor
 class MainActivity : Activity() {
 
     private lateinit var statusText: TextView
-    private lateinit var textToSend: EditText
+    private lateinit var pasteTextInput: EditText
+    private lateinit var liveTextInput: EditText
+    private lateinit var inputPages: ViewFlipper
+    private var activeInputPage = 0
+    private var liveInputReady = false
     private lateinit var speedLabel: TextView
     private var typingIntervalMs = 35L
-    private var pendingPasteText: String? = null
-    private var suppressInputWatcher = false
+    private var     private var suppressInputWatcher = false
     private var selectedTheme = 0
     private val themeNames = listOf("Cyan", "Violet", "Emerald", "Amber", "Rose")
     private val themeAccents = listOf(
@@ -95,7 +102,8 @@ class MainActivity : Activity() {
     }
 
     private fun buildInterface() {
-        val previousDraft = if (::textToSend.isInitialized) textToSend.text.toString() else ""
+        val previousPasteDraft = if (::pasteTextInput.isInitialized) pasteTextInput.text.toString() else ""
+        val previousLiveDraft = if (::liveTextInput.isInitialized) liveTextInput.text.toString() else ""
         val previousStatus = if (::statusText.isInitialized) statusText.text.toString() else "Starting PhoneKeys..."
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -110,14 +118,13 @@ class MainActivity : Activity() {
             setPadding(dp(18), dp(18), dp(18), dp(18))
             background = rounded(Color.rgb(25, 31, 49), 22)
         }
-        val brand = TextView(this).apply {
+        header.addView(TextView(this).apply {
             text = "PHONEKEYS  /  BT HID"
             textSize = 12f
             letterSpacing = 0.12f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(accentColor)
-        }
-        header.addView(brand)
+        })
         header.addView(TextView(this).apply {
             text = "Your phone. Your keyboard."
             textSize = 24f
@@ -138,53 +145,132 @@ class MainActivity : Activity() {
         connectRow.addView(actionButton("Unregister", false) { unregisterKeyboard() }, weightedParams(1f, start = 5))
         page.addView(connectRow, marginParams(bottom = 14))
 
-        addSectionTitle(page, "LIVE TEXT INPUT", "Type normally with your phone keyboard to send each character live. Paste a message, then tap Send to PC.")
-        textToSend = EditText(this).apply {
-            hint = "Type here or paste a message…"
+        // Two independent input modes: the paste/send page and the live typing page.
+        val pageTabs = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            background = rounded(Color.rgb(25, 31, 49), 16)
+        }
+        val pasteTab = actionButton("SEND TEXT", true) { showInputPage(0) }
+        val liveTab = actionButton("LIVE INPUT  →", false) { showInputPage(1) }
+        pageTabs.addView(pasteTab, weightedParams(1f, end = 4))
+        pageTabs.addView(liveTab, weightedParams(1f, start = 4))
+        page.addView(pageTabs, marginParams(bottom = 12))
+
+        inputPages = ViewFlipper(this).apply {
+            isMeasureAllChildren = true
+            setInAnimation(this@MainActivity, android.R.anim.fade_in)
+            setOutAnimation(this@MainActivity, android.R.anim.fade_out)
+        }
+
+        // PAGE 1: text to paste/type in full, then explicitly send to the PC.
+        val pastePage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+        }
+        val pasteSwipeHint = TextView(this).apply {
+            text = "SEND TEXT  ·  swipe right for Live Input →"
+            textSize = 12f
+            letterSpacing = 0.08f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(accentColor)
+            setPadding(dp(2), dp(3), dp(2), dp(9))
+            setOnTouchListener(swipeListener())
+        }
+        pastePage.addView(pasteSwipeHint)
+        pastePage.addView(TextView(this).apply {
+            text = "Paste or prepare a whole message here. It will only be sent when you tap the button."
+            textSize = 12f
+            setTextColor(Color.rgb(139, 151, 177))
+            setPadding(dp(2), 0, 0, dp(9))
+        })
+        pasteTextInput = EditText(this).apply {
+            hint = "Paste your message here…"
             setHintTextColor(Color.rgb(119, 130, 153))
             setTextColor(Color.rgb(25, 30, 43))
             textSize = 16f
-            minLines = 3
-            maxLines = 6
+            minLines = 4
+            maxLines = 8
             gravity = Gravity.TOP or Gravity.START
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
             setPadding(dp(14), dp(13), dp(14), dp(13))
             background = rounded(Color.rgb(239, 243, 250), 16)
         }
-        textToSend.setText(previousDraft)
-        textToSend.addTextChangedListener(object : TextWatcher {
+        pasteTextInput.setText(previousPasteDraft)
+        pastePage.addView(pasteTextInput, marginParams(bottom = 9))
+        pastePage.addView(actionButton("SEND TEXT TO PC  →", true) {
+            val content = pasteTextInput.text.toString()
+            if (content.isBlank()) updateStatus("Paste or enter a message first.") else sendText(content)
+        }, marginParams(bottom = 8))
+        pastePage.addView(actionButton("CLEAR TEXT", false) {
+            pasteTextInput.setText("")
+        }, marginParams(bottom = 14))
+        inputPages.addView(pastePage)
+
+        // PAGE 2: every normal key typed here is sent live; no send button.
+        val livePage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+        }
+        val liveSwipeHint = TextView(this).apply {
+            text = "← swipe left to return to Send Text"
+            textSize = 12f
+            letterSpacing = 0.08f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(accentColor)
+            setPadding(dp(2), dp(3), dp(2), dp(9))
+            setOnTouchListener(swipeListener())
+        }
+        livePage.addView(liveSwipeHint)
+        livePage.addView(TextView(this).apply {
+            text = "Tap the box, use your regular phone keyboard, and each typed character goes straight to the PC. No send button."
+            textSize = 12f
+            setTextColor(Color.rgb(139, 151, 177))
+            setPadding(dp(2), 0, 0, dp(9))
+        })
+        liveTextInput = EditText(this).apply {
+            hint = "Live typing starts here…"
+            setHintTextColor(Color.rgb(119, 130, 153))
+            setTextColor(Color.rgb(25, 30, 43))
+            textSize = 16f
+            minLines = 4
+            maxLines = 8
+            gravity = Gravity.TOP or Gravity.START
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            background = rounded(Color.rgb(239, 243, 250), 16)
+        }
+        liveTextInput.setText(previousLiveDraft)
+        liveInputReady = false
+        liveTextInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                if (suppressInputWatcher || s == null) return
-                if (count > 1) {
-                    // Multi-character insertion is treated as a paste; wait for Send to PC.
-                    pendingPasteText = s.subSequence(start, start + count).toString()
-                    updateStatus("Pasted text ready — tap Send to PC.")
-                } else if (count == 1 && before == 0) {
-                    val ch = s[start]
-                    if (ch == '\n' || ch == '\r') sendSpecial(0x28) else sendCharacter(ch)
+                if (!liveInputReady || s == null || isSendingText) return
+                if (count > 0 && before == 0) {
+                    val inserted = s.subSequence(start, start + count).toString()
+                    if (inserted.length == 1) {
+                        val ch = inserted[0]
+                        if (ch == '\n' || ch == '\r') sendSpecial(0x28) else sendCharacter(ch)
+                    } else {
+                        // Multi-character insertion/paste in Live Input is intentionally sent immediately.
+                        sendText(inserted)
+                    }
                 } else if (count == 0 && before == 1) {
                     sendSpecial(0x2A)
                 }
             }
             override fun afterTextChanged(s: Editable?) {}
         })
-        page.addView(textToSend, marginParams(bottom = 9))
-        page.addView(actionButton("SEND PASTED TEXT TO PC  →", true) {
-            val pasted = pendingPasteText
-            if (pasted.isNullOrEmpty()) {
-                updateStatus("Paste multiple characters into the box first. Normal typing sends live.")
-            } else {
-                sendText(pasted)
-                pendingPasteText = null
-            }
-        }, marginParams(bottom = 8))
-        page.addView(actionButton("CLEAR TEXT", false) {
-            suppressInputWatcher = true
-            textToSend.setText("")
-            suppressInputWatcher = false
-            pendingPasteText = null
+        livePage.addView(liveTextInput, marginParams(bottom = 9))
+        livePage.addView(actionButton("CLEAR LIVE BOX", false) {
+            liveInputReady = false
+            liveTextInput.setText("")
+            liveInputReady = true
         }, marginParams(bottom = 14))
+        inputPages.addView(livePage)
+        page.addView(inputPages, marginParams(bottom = 10))
+        inputPages.displayedChild = activeInputPage.coerceIn(0, 1)
+        liveInputReady = true
 
         addSectionTitle(page, "APPEARANCE", "Choose an accent theme for PhoneKeys.")
         val themeRow = LinearLayout(this).apply {
@@ -238,8 +324,8 @@ class MainActivity : Activity() {
         speedTop.addView(speedLabel)
         speedCard.addView(speedTop)
         val speedSeek = SeekBar(this).apply {
-            max = 175 // 25–200 ms between characters
-            progress = (typingIntervalMs.toInt() - 25).coerceIn(0, 175) // retain chosen speed
+            max = 175
+            progress = (typingIntervalMs.toInt() - 25).coerceIn(0, 175)
             progressTintList = android.content.res.ColorStateList.valueOf(accentColor)
             thumbTintList = android.content.res.ColorStateList.valueOf(accentColor)
             progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(66, 77, 103))
@@ -260,19 +346,44 @@ class MainActivity : Activity() {
         }
         speedCard.addView(speedSeek)
         speedCard.addView(TextView(this).apply {
-            text = "Lower delay = faster typing. If letters are missed, move the slider to the right."
+            text = "Lower delay = faster pasted text. If the PC misses characters, move the slider right."
             textSize = 12f
             setTextColor(Color.rgb(151, 164, 190))
         })
         page.addView(speedCard, marginParams(bottom = 18))
 
         page.addView(TextView(this).apply {
-            text = "Tip: ordinary typing is sent as you type. Multi-character pastes are held until you tap Send Pasted Text to PC. Basic Bluetooth HID does not support emoji or all Unicode characters."
+            text = "Send Text is for messages you want to review before sending. Live Input sends normal typing immediately. Basic Bluetooth HID does not support emoji or all Unicode characters."
             textSize = 12f
             setTextColor(Color.rgb(132, 145, 171))
             setPadding(dp(2), dp(5), dp(2), dp(4))
         }, marginParams(bottom = 8))
         setContentView(scroll)
+    }
+
+    private fun showInputPage(index: Int) {
+        activeInputPage = index.coerceIn(0, 1)
+        if (::inputPages.isInitialized) inputPages.displayedChild = activeInputPage
+        updateStatus(if (activeInputPage == 0) "Send Text mode: review a message, then send it." else "Live Input mode: typed characters send immediately.")
+    }
+
+    private fun swipeListener(): View.OnTouchListener {
+        var downX = 0f
+        var downY = 0f
+        return View.OnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> { downX = event.x; downY = event.y; true }
+                MotionEvent.ACTION_UP -> {
+                    val dx = event.x - downX
+                    val dy = event.y - downY
+                    if (kotlin.math.abs(dx) > dp(55) && kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
+                        showInputPage(if (dx > 0) 1 else 0)
+                    }
+                    true
+                }
+                else -> true
+            }
+        }
     }
 
     private fun addSectionTitle(parent: LinearLayout, title: String, subtitle: String) {
