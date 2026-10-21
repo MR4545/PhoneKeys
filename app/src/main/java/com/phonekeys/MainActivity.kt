@@ -43,7 +43,7 @@ class MainActivity : Activity() {
     private var liveInputReady = false
     private lateinit var speedLabel: TextView
     private var typingIntervalMs = 35L
-    private var     private var suppressInputWatcher = false
+    private var suppressInputWatcher = false
     private var selectedTheme = 0
     private val themeNames = listOf("Cyan", "Violet", "Emerald", "Amber", "Rose")
     private val themeAccents = listOf(
@@ -158,7 +158,7 @@ class MainActivity : Activity() {
         page.addView(pageTabs, marginParams(bottom = 12))
 
         inputPages = ViewFlipper(this).apply {
-            isMeasureAllChildren = true
+            measureAllChildren = true
             setInAnimation(this@MainActivity, android.R.anim.fade_in)
             setOutAnimation(this@MainActivity, android.R.anim.fade_out)
         }
