@@ -47,6 +47,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import java.util.concurrent.Executor
 
@@ -75,6 +76,9 @@ class MainActivity : Activity() {
     private lateinit var pasteTab: Button
     private lateinit var liveTab: Button
     private var typingIntervalMs = 35L
+    // When on, every newline is followed by Shift+Home so the receiver's auto-indent is
+    // selected and then overwritten by the indentation that is actually in the pasted text.
+    private var codeMode = true
     private var suppressInputWatcher = false
     private val scene = GlassScene()
     private val frostedHosts = ArrayList<View>()
@@ -254,6 +258,20 @@ class MainActivity : Activity() {
         pasteTextInput = inputField("Paste your message here…")
         pasteTextInput.setText(previousPasteDraft)
         pastePage.addView(pasteTextInput, marginParams())
+        val codeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        codeRow.addView(TextView(this).apply {
+            text = "Code mode (keep exact indentation)"
+            textSize = 13f
+            setTextColor(textSecondary)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        codeRow.addView(Switch(this).apply {
+            isChecked = codeMode
+            setOnCheckedChangeListener { _, checked -> codeMode = checked }
+        })
+        pastePage.addView(codeRow, marginParams(top = 12))
         val pasteActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         pasteActions.addView(actionButton("Clear", false) {
             pasteTextInput.setText("")
@@ -772,7 +790,12 @@ class MainActivity : Activity() {
         var skipped = 0
         text.forEach { ch ->
             when (ch) {
-                '\n', '\r' -> supported.add(QueuedKey(0x28, 0))
+                '\n' -> {
+                    supported.add(QueuedKey(0x28, 0)) // Enter
+                    // Select whatever auto-indent the receiver inserted so the next characters replace it.
+                    if (codeMode) supported.add(QueuedKey(0x4A, 0x02)) // Shift+Home
+                }
+                '\r' -> {} // CRLF: the '\n' that follows does the work
                 '\t' -> supported.add(QueuedKey(0x2B, 0))
                 else -> {
                     val pair = keyForCharacter(ch)
@@ -781,6 +804,8 @@ class MainActivity : Activity() {
                 }
             }
         }
+        // If the text ends with a newline, drop the leftover selection by jumping to End.
+        if (codeMode && text.trimEnd(' ', '\t', '\r').endsWith("\n")) supported.add(QueuedKey(0x4D, 0))
         if (supported.isEmpty()) { updateStatus("No supported characters found."); return }
 
         isSendingText = true
