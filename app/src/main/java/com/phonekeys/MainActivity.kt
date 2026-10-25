@@ -58,7 +58,11 @@ class MainActivity : Activity() {
     private lateinit var inputPages: ViewFlipper
     private var activeInputPage = 0
     private var liveInputReady = false
-    private var livePreviousText = ""
+    // Live input mirrors the receiving device: what it currently holds, where its caret is,
+    // and how many unsupported characters we have already warned about.
+    private var liveRemoteText = ""
+    private var liveRemoteCursor = 0
+    private var liveUnsupportedShown = 0
     // One ordered queue is shared by live typing and pasted-text sending so HID
     // key-down/key-up reports can never interleave between the two modes.
     private data class QueuedKey(val keyCode: Int, val modifier: Int)
@@ -263,55 +267,25 @@ class MainActivity : Activity() {
 
         // PAGE 2: every committed character is sent immediately.
         val livePage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        livePage.addView(caption("Type with your normal phone keyboard. Each character is sent to the connected device as you type.").apply {
+        livePage.addView(caption("Type with your normal phone keyboard. Typing, deleting and cursor moves are mirrored on the connected device as you go.").apply {
             setOnTouchListener(swipeListener())
         })
-        liveTextInput = inputField("Live typing starts here…")
+        liveTextInput = inputField("Live typing starts here…", live = true)
         liveTextInput.setText(previousLiveDraft)
-        livePreviousText = previousLiveDraft
+        resetLiveSync(previousLiveDraft)
         liveInputReady = false
         liveTextInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable?) {
-                if (s == null || !liveInputReady || suppressInputWatcher) return
-
-                // Soft keyboards mark provisional words with composing spans while
-                // autocorrect/predictive input is active. Wait until the IME commits
-                // the text; otherwise provisional letters may be sent and then sent
-                // again when the keyboard revises the word.
-                val composingStart = BaseInputConnection.getComposingSpanStart(s)
-                val composingEnd = BaseInputConnection.getComposingSpanEnd(s)
-                if (composingStart >= 0 && composingEnd >= composingStart) return
-
-                val oldText = livePreviousText
-                val newText = s.toString()
-                if (oldText == newText) return
-                livePreviousText = newText
-
-                var prefix = 0
-                while (prefix < oldText.length && prefix < newText.length && oldText[prefix] == newText[prefix]) prefix++
-                var suffix = 0
-                while (suffix < oldText.length - prefix && suffix < newText.length - prefix &&
-                    oldText[oldText.length - 1 - suffix] == newText[newText.length - 1 - suffix]) suffix++
-
-                val removedCount = oldText.length - prefix - suffix
-                val inserted = newText.substring(prefix, newText.length - suffix)
-                repeat(removedCount) { sendSpecial(0x2A) }
-                inserted.forEach { ch ->
-                    when (ch) {
-                        '\n', '\r' -> sendSpecial(0x28)
-                        '\t' -> sendSpecial(0x2B)
-                        else -> sendCharacter(ch)
-                    }
-                }
-            }
+            override fun afterTextChanged(s: Editable?) { syncLiveToRemote() }
         })
+        // Moving the caret (tapping, dragging, space-bar swipe) moves the caret on the other device too.
+        (liveTextInput as? LiveEditText)?.onSelectionChange = { syncLiveToRemote() }
         livePage.addView(liveTextInput, marginParams())
         livePage.addView(actionButton("Clear", false) {
             liveInputReady = false
             liveTextInput.setText("")
-            livePreviousText = ""
+            resetLiveSync("")
             liveInputReady = true
         }, marginParams(top = 12))
         inputPages.addView(livePage)
@@ -459,7 +433,7 @@ class MainActivity : Activity() {
         setStroke(dp(1), if (focused) Color.argb(175, 255, 255, 255) else Color.argb(40, 255, 255, 255))
     }
 
-    private fun inputField(hintText: String): EditText = EditText(this).apply {
+    private fun inputField(hintText: String, live: Boolean = false): EditText = (if (live) LiveEditText(this) else EditText(this)).apply {
         hint = hintText
         setHintTextColor(textTertiary)
         setTextColor(Color.WHITE)
@@ -467,7 +441,12 @@ class MainActivity : Activity() {
         minLines = 5
         maxLines = 9
         gravity = Gravity.TOP or Gravity.START
-        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        inputType = if (live) {
+            // No suggestions or autocorrect: keyboards then commit each letter immediately.
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        } else {
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        }
         setPadding(dp(18), dp(16), dp(18), dp(16))
         background = fieldBackground(false)
         setOnFocusChangeListener { v, hasFocus -> v.background = fieldBackground(hasFocus) }
@@ -652,6 +631,78 @@ class MainActivity : Activity() {
             return
         }
         enqueueLiveKey(pair.first, if (pair.second) 0x02 else 0)
+    }
+
+    private fun resetLiveSync(text: String) {
+        liveRemoteText = remoteForm(text)
+        liveRemoteCursor = liveRemoteText.length
+        liveUnsupportedShown = text.count { !isRemoteTypable(it) && it != '\r' }
+    }
+
+    private fun isRemoteTypable(ch: Char): Boolean = ch == '\n' || ch == '\t' || keyForCharacter(ch) != null
+
+    /** The text as the receiving device will actually see it: only characters the basic layout can type. */
+    private fun remoteForm(text: String): String = text.filter { isRemoteTypable(it) }
+
+    private fun typeRemoteChar(ch: Char) {
+        when (ch) {
+            '\n' -> enqueueLiveKey(0x28)
+            '\t' -> enqueueLiveKey(0x2B)
+            else -> keyForCharacter(ch)?.let { enqueueLiveKey(it.first, if (it.second) 0x02 else 0) }
+        }
+    }
+
+    /** Presses Left or Right arrow until the remote caret sits at [target]. */
+    private fun moveRemoteCursorTo(target: Int) {
+        val clamped = target.coerceIn(0, liveRemoteText.length)
+        val delta = clamped - liveRemoteCursor
+        if (delta > 0) repeat(delta) { enqueueLiveKey(0x4F) }       // Right arrow
+        else if (delta < 0) repeat(-delta) { enqueueLiveKey(0x50) } // Left arrow
+        liveRemoteCursor = clamped
+    }
+
+    /**
+     * Makes the receiving device match the live box. Safe to call as often as you like
+     * (every text change and every caret move): it only sends what is actually different.
+     *  1. Text: find the changed range, move the remote caret to its end, backspace the removed
+     *     characters, then type the new ones. This works anywhere in the text, not just at the end.
+     *  2. Caret: if the local caret is somewhere else, press arrows until the remote caret matches.
+     */
+    private fun syncLiveToRemote() {
+        if (!liveInputReady || suppressInputWatcher || !::liveTextInput.isInitialized) return
+        val text = liveTextInput.text?.toString() ?: return
+        val remoteText = remoteForm(text)
+        val selStart = liveTextInput.selectionStart
+        val selEnd = liveTextInput.selectionEnd
+        val caretTarget = if (selStart >= 0 && selStart == selEnd) {
+            remoteForm(text.substring(0, selStart.coerceAtMost(text.length))).length
+        } else -1
+        if (remoteText == liveRemoteText && (caretTarget < 0 || caretTarget == liveRemoteCursor)) return
+        if (getConnectedHost() == null) return // nothing is sent; the next change catches up
+
+        if (remoteText != liveRemoteText) {
+            val old = liveRemoteText
+            var prefix = 0
+            while (prefix < old.length && prefix < remoteText.length && old[prefix] == remoteText[prefix]) prefix++
+            var suffix = 0
+            while (suffix < old.length - prefix && suffix < remoteText.length - prefix &&
+                old[old.length - 1 - suffix] == remoteText[remoteText.length - 1 - suffix]) suffix++
+            val removed = old.length - prefix - suffix
+            val inserted = remoteText.substring(prefix, remoteText.length - suffix)
+
+            moveRemoteCursorTo(prefix + removed)
+            repeat(removed) { enqueueLiveKey(0x2A) } // Backspace
+            inserted.forEach { typeRemoteChar(it) }
+            liveRemoteText = remoteText
+            liveRemoteCursor = prefix + inserted.length
+        }
+        if (caretTarget >= 0) moveRemoteCursorTo(caretTarget)
+
+        val unsupported = text.count { !isRemoteTypable(it) && it != '\r' }
+        if (unsupported > liveUnsupportedShown) {
+            updateStatus("Skipped a character the basic keyboard layout can't type (emoji and some symbols).")
+        }
+        liveUnsupportedShown = unsupported
     }
 
     private fun enqueueLiveKey(keyCode: Int, modifier: Int = 0) {
@@ -890,6 +941,16 @@ private class GlassScene {
     private fun blob(c: Canvas, p: Paint, cx: Float, cy: Float, r: Float, from: Int, to: Int) {
         p.shader = LinearGradient(cx - r, cy - r, cx + r, cy + r, from, to, Shader.TileMode.CLAMP)
         c.drawCircle(cx, cy, r, p)
+    }
+}
+
+/** EditText that reports caret moves, so live input can mirror them on the other device. */
+private class LiveEditText(context: Context) : EditText(context) {
+    var onSelectionChange: (() -> Unit)? = null
+
+    override fun onSelectionChanged(selStart: Int, selEnd: Int) {
+        super.onSelectionChanged(selStart, selEnd)
+        onSelectionChange?.invoke()
     }
 }
 
