@@ -579,7 +579,269 @@ class MainActivity : Activity() {
         setSize(dp(26), dp(26))
     }
 
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
+    private fun marginParams(top: Int = 0, bottom: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(0, dp(top), 0, dp(bottom))
+        }
+
+    private fun weightedParams(weight: Float, start: Int = 0, end: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight).apply {
+            setMargins(dp(start), 0, dp(end), 0)
+        }
+
+    private fun initializeBluetooth() {
+        try {
+            val manager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+            val adapter: BluetoothAdapter? = manager.adapter
+            if (adapter == null) { updateStatus("This device has no Bluetooth adapter."); return }
+            if (!adapter.isEnabled) { updateStatus("Turn on Bluetooth in Android Settings."); return }
+            val success = adapter.getProfileProxy(this, profileListener, BluetoothProfile.HID_DEVICE)
+            updateStatus(if (success) "Requesting Bluetooth HID service..." else "Could not request the HID service.")
+        } catch (e: SecurityException) { updateStatus("Bluetooth permission is required.") }
+        catch (e: Exception) { updateStatus("Bluetooth error: ${e.message}") }
+    }
+
+    private fun registerKeyboard() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE), REQUEST_BLUETOOTH); return
+        }
+        val hid = hidDevice
+        if (hid == null) { updateStatus("HID service is not ready. Restart the app."); return }
+        try {
+            startKeyboardForegroundService()
+            val settings = BluetoothHidDeviceAppSdpSettings("PhoneKeys", "PhoneKeys Bluetooth Keyboard", "PhoneKeys", BluetoothHidDevice.SUBCLASS1_KEYBOARD, KEYBOARD_DESCRIPTOR)
+            val executor = Executor { command -> runOnUiThread { command.run() } }
+            val accepted = hid.registerApp(settings, null, null, executor, callback)
+            updateStatus(if (accepted) "Registration requested. Waiting for Android..." else "Android rejected the registration request.")
+        } catch (e: SecurityException) { updateStatus("Bluetooth permission denied.") }
+        catch (e: Exception) { updateStatus("Registration error: ${e.message}") }
+    }
+
+    private fun startKeyboardForegroundService() {
+        try {
+            val intent = android.content.Intent(this, KeyboardKeepAliveService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+        } catch (e: Exception) {
+            updateStatus("Could not start background keyboard service: ${e.message}")
+        }
+    }
+
+    private fun unregisterKeyboard() {
+        try {
+            val hid = hidDevice ?: run { updateStatus("HID service is not ready."); return }
+            hid.unregisterApp()
+            registered = false
+            keyboardRegistered = false
+            setLinkState(0)
+            stopService(android.content.Intent(this, KeyboardKeepAliveService::class.java))
+            updateStatus("Keyboard unregistered. Background keyboard service stopped.")
+        } catch (e: Exception) { updateStatus("Unregister error: ${e.message}") }
+    }
+
+    // Both Live Input and Send Text use this same ordered HID queue.
+    private fun sendSpecial(keyCode: Int, modifier: Int = 0) {
+        enqueueLiveKey(keyCode, modifier)
+    }
+
+    private fun sendCharacter(character: Char) {
+        val pair = keyForCharacter(character)
+        if (pair == null) {
+            updateStatus("Character '$character' is not supported by the basic keyboard layout.")
+            return
+        }
+        enqueueLiveKey(pair.first, if (pair.second) 0x02 else 0)
+    }
+
+    private fun enqueueLiveKey(keyCode: Int, modifier: Int = 0) {
+        if (getConnectedHost() == null) return
+        liveKeyQueue.addLast(QueuedKey(keyCode, modifier))
+        drainLiveKeyQueue()
+    }
+
+    private fun drainLiveKeyQueue() {
+        if (liveKeySending) return
+        if (liveKeyQueue.isEmpty()) {
+            if (isSendingText) {
+                isSendingText = false
+                updateStatus(if (pendingSkippedCharacters > 0) {
+                    "Finished sending text. Skipped $pendingSkippedCharacters unsupported character(s)."
+                } else "Finished sending text!")
+                pendingSkippedCharacters = 0
+            }
+            return
+        }
+        val target = getConnectedHost() ?: run { liveKeyQueue.clear(); isSendingText = false; return }
+        val hid = hidDevice ?: run { liveKeyQueue.clear(); isSendingText = false; return }
+        val key = liveKeyQueue.removeFirst()
+        liveKeySending = true
+        try {
+            val pressed = byteArrayOf(key.modifier.toByte(), 0, key.keyCode.toByte(), 0, 0, 0, 0, 0)
+            if (!hid.sendReport(target, 0, pressed)) {
+                updateStatus("Host rejected a key report. Reconnect or try a slower speed.")
+            }
+            val interval = typingIntervalMs.coerceAtLeast(25L)
+            val releaseDelay = minOf(18L, interval - 2L).coerceAtLeast(8L)
+            mainHandler.postDelayed({
+                try { hid.sendReport(target, 0, ByteArray(8)) }
+                catch (_: Exception) { updateStatus("Could not release a key. Reconnect and retry.") }
+                mainHandler.postDelayed({
+                    liveKeySending = false
+                    drainLiveKeyQueue()
+                }, (interval - releaseDelay).coerceAtLeast(1L))
+            }, releaseDelay)
+        } catch (e: SecurityException) {
+            liveKeySending = false
+            updateStatus("Bluetooth permission denied.")
+        } catch (e: Exception) {
+            liveKeySending = false
+            updateStatus("Keyboard send error: ${e.message}")
+        }
+    }
+
+    private fun sendReportStroke(keyCode: Int, modifier: Int = 0, delayMs: Long = 55L) {
+        val target = getConnectedHost() ?: return
+        try {
+            val hid = hidDevice ?: return
+            val pressed = byteArrayOf(modifier.toByte(), 0, keyCode.toByte(), 0, 0, 0, 0, 0)
+            val released = ByteArray(8)
+            if (!hid.sendReport(target, 0, pressed)) { updateStatus("Android could not send the key."); return }
+            mainHandler.postDelayed({ try { hid.sendReport(target, 0, released) } catch (_: Exception) { updateStatus("Key release failed. Reconnect and retry.") } }, delayMs)
+        } catch (e: SecurityException) { updateStatus("Bluetooth permission denied.") }
+        catch (e: Exception) { updateStatus("Send error: ${e.message}") }
+    }
+
+    private fun sendText(text: String) {
+        if (text.isEmpty()) { updateStatus("Type or paste some text first."); return }
+        if (isSendingText) { updateStatus("Text is already being sent. Wait for it to finish."); return }
+        if (getConnectedHost() == null) return
+
+        val supported = ArrayList<QueuedKey>()
+        var skipped = 0
+        text.forEach { ch ->
+            when (ch) {
+                '\n', '\r' -> supported.add(QueuedKey(0x28, 0))
+                '\t' -> supported.add(QueuedKey(0x2B, 0))
+                else -> {
+                    val pair = keyForCharacter(ch)
+                    if (pair == null) skipped++
+                    else supported.add(QueuedKey(pair.first, if (pair.second) 0x02 else 0))
+                }
+            }
+        }
+        if (supported.isEmpty()) { updateStatus("No supported characters found."); return }
+
+        isSendingText = true
+        pendingSkippedCharacters = skipped
+        liveKeyQueue.addAll(supported)
+        updateStatus("Sending ${supported.size} keystrokes to the connected host · ${typingIntervalMs} ms interval…")
+        if (skipped > 0) {
+            mainHandler.postDelayed({
+                if (isSendingText) updateStatus("Sending text; $skipped unsupported emoji/Unicode character(s) will be skipped.")
+            }, 500L)
+        }
+        drainLiveKeyQueue()
+    }
+
+    private fun getConnectedHost(): BluetoothDevice? {
+        try {
+            val hid = hidDevice
+            if (hid == null || !registered) {
+                updateStatus("Register the PhoneKeys keyboard first, then connect a computer or compatible Android phone.")
+                return null
+            }
+            val host = hid.connectedDevices.firstOrNull()
+            if (host == null) {
+                updateStatus("No connected host. In the other device's Bluetooth settings, connect to PhoneKeys or this phone's advertised keyboard service.")
+                return null
+            }
+            return host
+        } catch (e: SecurityException) {
+            updateStatus("Bluetooth permission denied.")
+            return null
+        } catch (e: Exception) {
+            updateStatus("Could not check Bluetooth host: ${e.message}")
+            return null
+        }
+    }
+
+    private fun requestHostDiscoverability() {
+        // HID registration exposes the keyboard service. Discoverability helps a
+        // nearby phone find this handset during pairing; Android still asks the
+        // user to approve the visibility window.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE), REQUEST_ADVERTISE)
+            return
+        }
+        try {
+            val intent = android.content.Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
+                putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            updateStatus("Keyboard registered. If PhoneKeys isn't visible, open Bluetooth settings and enable visibility.")
+        }
+    }
+
+    // Returns (HID usage code, requires Shift).
+    private fun keyForCharacter(ch: Char): Pair<Int, Boolean>? {
+        if (ch in 'a'..'z') return Pair(0x04 + (ch - 'a'), false)
+        if (ch in 'A'..'Z') return Pair(0x04 + (ch - 'A'), true)
+        if (ch in '1'..'9') return Pair(0x1E + (ch - '1'), false)
+        if (ch == '0') return Pair(0x27, false)
+        return when (ch) {
+            ' ' -> Pair(0x2C, false)
+            '!' -> Pair(0x1E, true); '@' -> Pair(0x1F, true); '#' -> Pair(0x20, true); '$' -> Pair(0x21, true)
+            '%' -> Pair(0x22, true); '^' -> Pair(0x23, true); '&' -> Pair(0x24, true); '*' -> Pair(0x25, true)
+            '(' -> Pair(0x26, true); ')' -> Pair(0x27, true); '-' -> Pair(0x2D, false); '_' -> Pair(0x2D, true)
+            '=' -> Pair(0x2E, false); '+' -> Pair(0x2E, true); '[' -> Pair(0x2F, false); '{' -> Pair(0x2F, true)
+            ']' -> Pair(0x30, false); '}' -> Pair(0x30, true); '\\' -> Pair(0x31, false); '|' -> Pair(0x31, true)
+            ';' -> Pair(0x33, false); ':' -> Pair(0x33, true); '\'' -> Pair(0x34, false); '"' -> Pair(0x34, true)
+            '`' -> Pair(0x35, false); '~' -> Pair(0x35, true); ',' -> Pair(0x36, false); '<' -> Pair(0x36, true)
+            '.' -> Pair(0x37, false); '>' -> Pair(0x37, true); '/' -> Pair(0x38, false); '?' -> Pair(0x38, true)
+            else -> null
+        }
+    }
+
+    private fun updateStatus(message: String) { if (::statusText.isInitialized) statusText.text = message }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_BLUETOOTH) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) initializeBluetooth()
+            else updateStatus("Bluetooth permission was not granted.")
+        } else if (requestCode == REQUEST_ADVERTISE) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) requestHostDiscoverability()
+            else updateStatus("Keyboard registered. Enable Bluetooth visibility manually if the other phone cannot find this device.")
+        }
+    }
+
+    override fun onDestroy() {
+        // Do not unregister HID or close the profile proxy here. Android can destroy
+        // the Activity while the user switches apps; the foreground service keeps the
+        // keyboard session alive until the user explicitly taps Unregister.
+        super.onDestroy()
+    }
+
+    companion object {
+        @Volatile private var keyboardRegistered = false
+        @Volatile private var linkState = 0
+        private const val REQUEST_BLUETOOTH = 100
+        private const val REQUEST_ADVERTISE = 101
+        private val KEYBOARD_DESCRIPTOR = intArrayOf(
+            0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
+            0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,
+            0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
+            0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01,
+            0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01,
+            0x29, 0x05, 0x91, 0x02, 0x95, 0x01, 0x75, 0x03,
+            0x91, 0x01, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00,
+            0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65,
+            0x81, 0x00, 0xC0
+        ).map { it.toByte() }.toByteArray()
+    }
 }
 
 // ---------------------------------------------------------------------------
