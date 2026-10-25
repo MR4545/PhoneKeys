@@ -8,10 +8,18 @@ import android.bluetooth.BluetoothHidDevice
 import android.bluetooth.BluetoothHidDeviceAppSdpSettings
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -50,6 +58,10 @@ class MainActivity : Activity() {
     private var liveKeySending = false
     private var pendingSkippedCharacters = 0
     private lateinit var speedLabel: TextView
+    private lateinit var statusDot: View
+    private lateinit var statusTitle: TextView
+    private lateinit var pasteTab: Button
+    private lateinit var liveTab: Button
     private var typingIntervalMs = 35L
     private var suppressInputWatcher = false
     private var selectedTheme = 0
@@ -71,6 +83,7 @@ class MainActivity : Activity() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
             this@MainActivity.registered = registered
             keyboardRegistered = registered
+            setLinkState(if (!registered) 0 else if (pluggedDevice != null) 3 else 1)
             if (registered) {
                 updateStatus("PhoneKeys keyboard registered. Connect a computer or compatible Android phone in Bluetooth settings.")
                 requestHostDiscoverability()
@@ -82,11 +95,15 @@ class MainActivity : Activity() {
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    setLinkState(3)
                     val hostName = try { device?.name?.takeIf { it.isNotBlank() } } catch (_: SecurityException) { null }
                     updateStatus("Connected${hostName?.let { " to $it" } ?: " to a host device"}. Ready to type!")
                 }
-                BluetoothProfile.STATE_CONNECTING -> updateStatus("Connecting to Bluetooth host...")
-                BluetoothProfile.STATE_DISCONNECTED -> updateStatus("Host disconnected. Reconnect from the other device's Bluetooth settings.")
+                BluetoothProfile.STATE_CONNECTING -> { setLinkState(2); updateStatus("Connecting to Bluetooth host...") }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    setLinkState(if (registered) 1 else 0)
+                    updateStatus("Host disconnected. Reconnect from the other device's Bluetooth settings.")
+                }
                 else -> updateStatus("Bluetooth state: $state")
             }
         }
@@ -106,6 +123,7 @@ class MainActivity : Activity() {
                 hidDevice = null
                 registered = false
                 keyboardRegistered = false
+                setLinkState(0)
                 updateStatus("Bluetooth HID service disconnected. Reopen PhoneKeys and register again if needed.")
             }
         }
@@ -113,6 +131,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.statusBarColor = BACKDROP_BASE
+        window.navigationBarColor = BACKDROP_BASE
         buildInterface()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
@@ -120,145 +140,119 @@ class MainActivity : Activity() {
         } else initializeBluetooth()
     }
 
+    private val textSecondary = Color.argb(170, 255, 255, 255)
+    private val textTertiary = Color.argb(105, 255, 255, 255)
+
     private fun buildInterface() {
         val previousPasteDraft = if (::pasteTextInput.isInitialized) pasteTextInput.text.toString() else ""
         val previousLiveDraft = if (::liveTextInput.isInitialized) liveTextInput.text.toString() else ""
         val previousStatus = if (::statusText.isInitialized) statusText.text.toString() else "Starting PhoneKeys..."
+
+        val root = FrameLayout(this)
+        root.addView(
+            GlassBackdrop(this, accentColor),
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(22))
-            setBackgroundColor(Color.rgb(12, 15, 25))
+            setPadding(dp(20), dp(28), dp(20), dp(28))
         }
-        val scroll = ScrollView(this).apply { isFillViewport = true }
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
         scroll.addView(page)
+        root.addView(
+            scroll,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
 
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(18), dp(18), dp(18))
-            background = rounded(Color.rgb(25, 31, 49), 22)
-        }
-        header.addView(TextView(this).apply {
-            text = "PHONEKEYS  /  BT HID"
-            textSize = 12f
-            letterSpacing = 0.12f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(accentColor)
-        })
-        header.addView(TextView(this).apply {
-            text = "Your phone. Your keyboard."
-            textSize = 24f
-            typeface = Typeface.create("sans-serif", Typeface.BOLD)
+        page.addView(TextView(this).apply {
+            text = "PhoneKeys"
+            textSize = 30f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            letterSpacing = -0.01f
             setTextColor(Color.WHITE)
-            setPadding(0, dp(7), 0, dp(5))
         })
+        page.addView(TextView(this).apply {
+            text = "Use this phone as a Bluetooth keyboard"
+            textSize = 14f
+            setTextColor(textSecondary)
+            setPadding(0, dp(4), 0, 0)
+        }, marginParams(bottom = 20))
+
+        
+        val statusCard = glassCard(strong = true)
+        val statusRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        statusDot = View(this)
+        statusRow.addView(statusDot, LinearLayout.LayoutParams(dp(18), dp(18)))
+        statusTitle = TextView(this).apply {
+            textSize = 16f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(Color.WHITE)
+            setPadding(dp(10), 0, 0, 0)
+        }
+        statusRow.addView(statusTitle)
+        statusCard.addView(statusRow)
         statusText = TextView(this).apply {
             text = previousStatus
             textSize = 13f
-            setTextColor(Color.rgb(180, 194, 220))
+            setLineSpacing(0f, 1.15f)
+            setTextColor(textSecondary)
+            setPadding(0, dp(8), 0, dp(16))
         }
-        header.addView(statusText)
-        page.addView(header, marginParams(bottom = 12))
-
+        statusCard.addView(statusText)
         val connectRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        connectRow.addView(actionButton("Register", true) { registerKeyboard() }, weightedParams(1f, end = 5))
-        connectRow.addView(actionButton("Unregister", false) { unregisterKeyboard() }, weightedParams(1f, start = 5))
-        page.addView(connectRow, marginParams(bottom = 14))
+        connectRow.addView(actionButton("Register keyboard", true) { registerKeyboard() }, weightedParams(1.4f, end = 4))
+        connectRow.addView(actionButton("Unregister", false) { unregisterKeyboard() }, weightedParams(1f, start = 4))
+        statusCard.addView(connectRow)
+        page.addView(statusCard, marginParams(bottom = 16))
 
-        // Two independent input modes: the paste/send page and the live typing page.
-        val pageTabs = LinearLayout(this).apply {
+        val tabBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(4), dp(4), dp(4), dp(4))
-            background = rounded(Color.rgb(25, 31, 49), 16)
+            background = glass(18)
         }
-        val pasteTab = actionButton("SEND TEXT", true) { showInputPage(0) }
-        val liveTab = actionButton("LIVE INPUT  →", false) { showInputPage(1) }
-        pageTabs.addView(pasteTab, weightedParams(1f, end = 4))
-        pageTabs.addView(liveTab, weightedParams(1f, start = 4))
-        page.addView(pageTabs, marginParams(bottom = 12))
+        pasteTab = tabButton("Send text") { showInputPage(0) }
+        liveTab = tabButton("Live input") { showInputPage(1) }
+        tabBar.addView(pasteTab, weightedParams(1f, end = 2))
+        tabBar.addView(liveTab, weightedParams(1f, start = 2))
+        page.addView(tabBar, marginParams(bottom = 12))
 
+        val inputCard = glassCard()
         inputPages = ViewFlipper(this).apply {
             measureAllChildren = true
             setInAnimation(this@MainActivity, android.R.anim.fade_in)
             setOutAnimation(this@MainActivity, android.R.anim.fade_out)
         }
-
-        // PAGE 1: text to paste/type in full, then explicitly send to the PC.
-        val pastePage = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(2), dp(2), dp(2), dp(2))
-        }
-        val pasteSwipeHint = TextView(this).apply {
-            text = "SEND TEXT  ·  swipe right for Live Input →"
-            textSize = 12f
-            letterSpacing = 0.08f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(accentColor)
-            setPadding(dp(2), dp(3), dp(2), dp(9))
+        
+        val pastePage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        pastePage.addView(caption("Write or paste a message, review it, then send it all at once.").apply {
             setOnTouchListener(swipeListener())
-        }
-        pastePage.addView(pasteSwipeHint)
-        pastePage.addView(TextView(this).apply {
-            text = "Paste or prepare a whole message here. It will only be sent when you tap the button."
-            textSize = 12f
-            setTextColor(Color.rgb(139, 151, 177))
-            setPadding(dp(2), 0, 0, dp(9))
         })
-        pasteTextInput = EditText(this).apply {
-            hint = "Paste your message here…"
-            setHintTextColor(Color.rgb(119, 130, 153))
-            setTextColor(Color.rgb(25, 30, 43))
-            textSize = 16f
-            minLines = 4
-            maxLines = 8
-            gravity = Gravity.TOP or Gravity.START
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            setPadding(dp(14), dp(13), dp(14), dp(13))
-            background = rounded(Color.rgb(239, 243, 250), 16)
-        }
+        pasteTextInput = inputField("Paste your message here…")
         pasteTextInput.setText(previousPasteDraft)
-        pastePage.addView(pasteTextInput, marginParams(bottom = 9))
-        pastePage.addView(actionButton("SEND TEXT TO PC  →", true) {
+        pastePage.addView(pasteTextInput, marginParams())
+        val pasteActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        pasteActions.addView(actionButton("Clear", false) {
+            pasteTextInput.setText("")
+        }, weightedParams(1f, end = 4))
+        pasteActions.addView(actionButton("Send to device", true) {
             val content = pasteTextInput.text.toString()
             if (content.isBlank()) updateStatus("Paste or enter a message first.") else sendText(content)
-        }, marginParams(bottom = 8))
-        pastePage.addView(actionButton("CLEAR TEXT", false) {
-            pasteTextInput.setText("")
-        }, marginParams(bottom = 14))
+        }, weightedParams(1.6f, start = 4))
+        pastePage.addView(pasteActions, marginParams(top = 12))
         inputPages.addView(pastePage)
 
-        // PAGE 2: every normal key typed here is sent live; no send button.
-        val livePage = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(2), dp(2), dp(2), dp(2))
-        }
-        val liveSwipeHint = TextView(this).apply {
-            text = "← swipe left to return to Send Text"
-            textSize = 12f
-            letterSpacing = 0.08f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(accentColor)
-            setPadding(dp(2), dp(3), dp(2), dp(9))
+        val livePage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        livePage.addView(caption("Type with your normal phone keyboard. Each character is sent to the connected device as you type.").apply {
             setOnTouchListener(swipeListener())
-        }
-        livePage.addView(liveSwipeHint)
-        livePage.addView(TextView(this).apply {
-            text = "Type with your regular phone keyboard. Committed characters are sent live to the connected Bluetooth host, including a compatible Android phone."
-            textSize = 12f
-            setTextColor(Color.rgb(139, 151, 177))
-            setPadding(dp(2), 0, 0, dp(9))
         })
-        liveTextInput = EditText(this).apply {
-            hint = "Live typing starts here…"
-            setHintTextColor(Color.rgb(119, 130, 153))
-            setTextColor(Color.rgb(25, 30, 43))
-            textSize = 16f
-            minLines = 4
-            maxLines = 8
-            gravity = Gravity.TOP or Gravity.START
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-            setPadding(dp(14), dp(13), dp(14), dp(13))
-            background = rounded(Color.rgb(239, 243, 250), 16)
-        }
+        liveTextInput = inputField("Live typing starts here…")
         liveTextInput.setText(previousLiveDraft)
         livePreviousText = previousLiveDraft
         liveInputReady = false
@@ -268,10 +262,6 @@ class MainActivity : Activity() {
             override fun afterTextChanged(s: Editable?) {
                 if (s == null || !liveInputReady || suppressInputWatcher) return
 
-                // Soft keyboards mark provisional words with composing spans while
-                // autocorrect/predictive input is active. Wait until the IME commits
-                // the text; otherwise provisional letters may be sent and then sent
-                // again when the keyboard revises the word.
                 val composingStart = BaseInputConnection.getComposingSpanStart(s)
                 val composingEnd = BaseInputConnection.getComposingSpanEnd(s)
                 if (composingStart >= 0 && composingEnd >= composingStart) return
@@ -299,65 +289,34 @@ class MainActivity : Activity() {
                 }
             }
         })
-        livePage.addView(liveTextInput, marginParams(bottom = 9))
-        livePage.addView(actionButton("CLEAR LIVE BOX", false) {
+        livePage.addView(liveTextInput, marginParams())
+        livePage.addView(actionButton("Clear", false) {
             liveInputReady = false
             liveTextInput.setText("")
             livePreviousText = ""
             liveInputReady = true
-        }, marginParams(bottom = 14))
+        }, marginParams(top = 12))
         inputPages.addView(livePage)
-        page.addView(inputPages, marginParams(bottom = 10))
+        inputCard.addView(inputPages)
+        page.addView(inputCard, marginParams(bottom = 16))
         inputPages.displayedChild = activeInputPage.coerceIn(0, 1)
         liveInputReady = true
 
-        addSectionTitle(page, "APPEARANCE", "Choose an accent theme for PhoneKeys.")
-        val themeRow = LinearLayout(this).apply {
+        val speedCard = glassCard()
+        val speedTop = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+            gravity = Gravity.CENTER_VERTICAL
         }
-        themeNames.forEachIndexed { index, name ->
-            val themeButton = Button(this).apply {
-                text = name
-                isAllCaps = false
-                textSize = 11f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(if (index == selectedTheme) Color.rgb(12, 18, 28) else Color.rgb(222, 230, 245))
-                background = rounded(if (index == selectedTheme) themeAccents[index] else Color.rgb(40, 48, 70), 12)
-                minWidth = 0
-                minHeight = dp(42)
-                setPadding(dp(2), 0, dp(2), 0)
-                stateListAnimator = null
-                setOnClickListener {
-                    if (selectedTheme != index) {
-                        selectedTheme = index
-                        buildInterface()
-                    }
-                }
-            }
-            val params = LinearLayout.LayoutParams(0, dp(42), 1f)
-            params.setMargins(dp(2), 0, dp(2), 0)
-            themeRow.addView(themeButton, params)
-        }
-        page.addView(themeRow, marginParams(bottom = 16))
-
-        val speedCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(10))
-            background = rounded(Color.rgb(25, 31, 49), 17)
-        }
-        val speedTop = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         speedTop.addView(TextView(this).apply {
-            text = "TEXT SPEED"
-            textSize = 12f
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.08f
-            setTextColor(Color.rgb(173, 187, 215))
+            text = "Typing speed"
+            textSize = 15f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(Color.WHITE)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         speedLabel = TextView(this).apply {
-            text = "VERY FAST · 35 ms"
+            text = speedText(typingIntervalMs)
             textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setTextColor(accentColor)
         }
         speedTop.addView(speedLabel)
@@ -365,45 +324,66 @@ class MainActivity : Activity() {
         val speedSeek = SeekBar(this).apply {
             max = 175
             progress = (typingIntervalMs.toInt() - 25).coerceIn(0, 175)
-            progressTintList = android.content.res.ColorStateList.valueOf(accentColor)
-            thumbTintList = android.content.res.ColorStateList.valueOf(accentColor)
-            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(66, 77, 103))
+            progressTintList = ColorStateList.valueOf(accentColor)
+            thumbTintList = ColorStateList.valueOf(accentColor)
+            progressBackgroundTintList = ColorStateList.valueOf(Color.argb(70, 255, 255, 255))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     typingIntervalMs = (progress + 25).toLong()
-                    val label = when {
-                        typingIntervalMs <= 35 -> "VERY FAST"
-                        typingIntervalMs <= 60 -> "FAST"
-                        typingIntervalMs <= 110 -> "NORMAL"
-                        else -> "SLOW / SAFE"
-                    }
-                    speedLabel.text = "$label · ${typingIntervalMs} ms"
+                    speedLabel.text = speedText(typingIntervalMs)
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
         }
-        speedCard.addView(speedSeek)
-        speedCard.addView(TextView(this).apply {
-            text = "Lower delay = faster pasted text. If the PC misses characters, move the slider right."
-            textSize = 12f
-            setTextColor(Color.rgb(151, 164, 190))
-        })
-        page.addView(speedCard, marginParams(bottom = 18))
+        speedCard.addView(speedSeek, marginParams(top = 8, bottom = 4))
+        speedCard.addView(caption("A shorter delay sends text faster. If the receiving device misses characters, move the slider right.", bottom = 0))
+        page.addView(speedCard, marginParams(bottom = 16))
+
+        val accentCard = glassCard()
+        addSectionTitle(accentCard, "Accent color", "Changes the background glow and highlights.")
+        val swatchRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        themeAccents.forEachIndexed { index, color ->
+            val cell = FrameLayout(this)
+            val swatch = View(this).apply {
+                contentDescription = themeNames[index]
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(color)
+                    if (index == selectedTheme) setStroke(dp(3), Color.WHITE)
+                    else setStroke(dp(1), Color.argb(90, 255, 255, 255))
+                }
+                setOnClickListener {
+                    if (selectedTheme != index) {
+                        selectedTheme = index
+                        buildInterface()
+                    }
+                }
+            }
+            cell.addView(swatch, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER))
+            swatchRow.addView(cell, LinearLayout.LayoutParams(0, dp(48), 1f))
+        }
+        accentCard.addView(swatchRow)
+        page.addView(accentCard, marginParams(bottom = 18))
 
         page.addView(TextView(this).apply {
-            text = "Send Text is for messages you want to review before sending. Live Input sends normal typing immediately. Basic Bluetooth HID does not support emoji or all Unicode characters."
+            text = "Basic Bluetooth keyboards can't type emoji or most non-ASCII characters. Unsupported characters are skipped."
             textSize = 12f
-            setTextColor(Color.rgb(132, 145, 171))
-            setPadding(dp(2), dp(5), dp(2), dp(4))
-        }, marginParams(bottom = 8))
-        setContentView(scroll)
+            gravity = Gravity.CENTER
+            setLineSpacing(0f, 1.15f)
+            setTextColor(textTertiary)
+            setPadding(dp(8), 0, dp(8), 0)
+        }, marginParams())
+
+        setContentView(root)
+        setLinkState(linkState)
+        refreshTabs()
     }
 
     private fun showInputPage(index: Int) {
         activeInputPage = index.coerceIn(0, 1)
         if (::inputPages.isInitialized) inputPages.displayedChild = activeInputPage
-        updateStatus(if (activeInputPage == 0) "Send Text mode: review a message, then send it." else "Live Input mode: typed characters send immediately.")
+        refreshTabs()
     }
 
     private fun swipeListener(): View.OnTouchListener {
@@ -425,42 +405,161 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun speedText(ms: Long): String {
+        val label = when {
+            ms <= 35 -> "Very fast"
+            ms <= 60 -> "Fast"
+            ms <= 110 -> "Normal"
+            else -> "Slow and safe"
+        }
+        return "$label, $ms ms"
+    }
+
+    /** Translucent frosted panel: diagonal white sheen plus a hairline light border. */
+    private fun glass(radiusDp: Int, strong: Boolean = false): GradientDrawable =
+        GradientDrawable(
+            GradientDrawable.Orientation.TL_BR,
+            intArrayOf(
+                Color.argb(if (strong) 58 else 42, 255, 255, 255),
+                Color.argb(if (strong) 24 else 14, 255, 255, 255)
+            )
+        ).apply {
+            cornerRadius = dp(radiusDp).toFloat()
+            setStroke(dp(1), Color.argb(if (strong) 95 else 62, 255, 255, 255))
+        }
+
+    private fun glassCard(strong: Boolean = false): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(18), dp(18), dp(18), dp(18))
+        background = glass(24, strong)
+    }
+
+    private fun withRipple(content: GradientDrawable, radiusDp: Int): RippleDrawable {
+        val mask = GradientDrawable().apply {
+            setColor(Color.WHITE)
+            cornerRadius = dp(radiusDp).toFloat()
+        }
+        return RippleDrawable(ColorStateList.valueOf(Color.argb(60, 255, 255, 255)), content, mask)
+    }
+
+    private fun caption(text: String, bottom: Int = 12): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 13f
+        setLineSpacing(0f, 1.15f)
+        setTextColor(textSecondary)
+        setPadding(0, 0, 0, dp(bottom))
+    }
+
+    private fun fieldBackground(focused: Boolean): GradientDrawable = GradientDrawable().apply {
+        setColor(Color.argb(95, 6, 8, 20))
+        cornerRadius = dp(16).toFloat()
+        setStroke(dp(1), if (focused) withAlpha(accentColor, 210) else Color.argb(50, 255, 255, 255))
+    }
+
+    private fun inputField(hintText: String): EditText = EditText(this).apply {
+        hint = hintText
+        setHintTextColor(textTertiary)
+        setTextColor(Color.WHITE)
+        textSize = 16f
+        minLines = 5
+        maxLines = 9
+        gravity = Gravity.TOP or Gravity.START
+        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        setPadding(dp(16), dp(14), dp(16), dp(14))
+        background = fieldBackground(false)
+        setOnFocusChangeListener { v, hasFocus -> v.background = fieldBackground(hasFocus) }
+    }
+
     private fun addSectionTitle(parent: LinearLayout, title: String, subtitle: String) {
         parent.addView(TextView(this).apply {
             text = title
-            textSize = 12f
-            letterSpacing = 0.12f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(accentColor)
-            setPadding(dp(2), dp(2), 0, dp(4))
+            textSize = 15f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(Color.WHITE)
         })
         parent.addView(TextView(this).apply {
             text = subtitle
-            textSize = 12f
-            setTextColor(Color.rgb(139, 151, 177))
-            setPadding(dp(2), 0, 0, dp(9))
+            textSize = 13f
+            setTextColor(textSecondary)
+            setPadding(0, dp(2), 0, dp(12))
         })
     }
 
     private fun actionButton(label: String, primary: Boolean, action: () -> Unit): Button {
+        val radius = 16
+        val face: GradientDrawable = if (primary) {
+            GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(blendWithWhite(accentColor, 0.22f), accentColor)
+            ).apply { cornerRadius = dp(radius).toFloat() }
+        } else glass(radius)
         return Button(this).apply {
             text = label
             isAllCaps = false
             textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(if (primary) Color.rgb(12, 25, 33) else Color.rgb(220, 229, 245))
-            background = rounded(if (primary) accentColor else Color.rgb(40, 48, 70), 14)
-            minHeight = dp(48)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(if (primary) Color.rgb(8, 12, 24) else Color.argb(235, 255, 255, 255))
+            background = withRipple(face, radius)
+            minHeight = dp(50)
             stateListAnimator = null
-            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setPadding(dp(14), dp(10), dp(14), dp(10))
             setOnClickListener { action() }
         }
     }
 
-    private fun rounded(color: Int, radiusDp: Int): GradientDrawable = GradientDrawable().apply {
-        setColor(color)
-        cornerRadius = dp(radiusDp).toFloat()
+    private fun tabButton(label: String, action: () -> Unit): Button = Button(this).apply {
+        text = label
+        isAllCaps = false
+        textSize = 14f
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        minHeight = dp(44)
+        stateListAnimator = null
+        setPadding(dp(10), dp(8), dp(10), dp(8))
+        setOnClickListener { action() }
     }
+
+    private fun styleTab(button: Button, selected: Boolean) {
+        val face = GradientDrawable().apply {
+            cornerRadius = dp(14).toFloat()
+            if (selected) {
+                setColor(withAlpha(accentColor, 75))
+                setStroke(dp(1), withAlpha(accentColor, 160))
+            } else {
+                setColor(Color.TRANSPARENT)
+            }
+        }
+        button.background = withRipple(face, 14)
+        button.setTextColor(if (selected) Color.WHITE else textSecondary)
+    }
+
+    private fun refreshTabs() {
+        if (!::pasteTab.isInitialized || !::liveTab.isInitialized) return
+        styleTab(pasteTab, activeInputPage == 0)
+        styleTab(liveTab, activeInputPage == 1)
+    }
+
+    private fun setLinkState(state: Int) {
+        linkState = state
+        if (!::statusDot.isInitialized || !::statusTitle.isInitialized) return
+        val (title, color) = when (state) {
+            3 -> "Connected" to Color.rgb(94, 224, 154)
+            2 -> "Connecting" to Color.rgb(255, 190, 92)
+            1 -> "Ready to pair" to Color.rgb(255, 190, 92)
+            else -> "Not registered" to Color.rgb(150, 160, 185)
+        }
+        statusTitle.text = title
+        val glow = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(withAlpha(color, 75)) }
+        val core = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(color) }
+        statusDot.background = LayerDrawable(arrayOf(glow, core)).apply {
+            setLayerInset(1, dp(4), dp(4), dp(4), dp(4))
+        }
+    }
+
+    private fun blendWithWhite(color: Int, fraction: Float): Int = Color.rgb(
+        (Color.red(color) + (255 - Color.red(color)) * fraction).toInt(),
+        (Color.green(color) + (255 - Color.green(color)) * fraction).toInt(),
+        (Color.blue(color) + (255 - Color.blue(color)) * fraction).toInt()
+    )
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
@@ -517,12 +616,13 @@ class MainActivity : Activity() {
             hid.unregisterApp()
             registered = false
             keyboardRegistered = false
+            setLinkState(0)
             stopService(android.content.Intent(this, KeyboardKeepAliveService::class.java))
             updateStatus("Keyboard unregistered. Background keyboard service stopped.")
         } catch (e: Exception) { updateStatus("Unregister error: ${e.message}") }
     }
 
-    // Both Live Input and Send Text use this same ordered HID queue.
+
     private fun sendSpecial(keyCode: Int, modifier: Int = 0) {
         enqueueLiveKey(keyCode, modifier)
     }
@@ -649,9 +749,6 @@ class MainActivity : Activity() {
     }
 
     private fun requestHostDiscoverability() {
-        // HID registration exposes the keyboard service. Discoverability helps a
-        // nearby phone find this handset during pairing; Android still asks the
-        // user to approve the visibility window.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE), REQUEST_ADVERTISE)
@@ -667,7 +764,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // Returns (HID usage code, requires Shift).
     private fun keyForCharacter(ch: Char): Pair<Int, Boolean>? {
         if (ch in 'a'..'z') return Pair(0x04 + (ch - 'a'), false)
         if (ch in 'A'..'Z') return Pair(0x04 + (ch - 'A'), true)
@@ -701,14 +797,13 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        // Do not unregister HID or close the profile proxy here. Android can destroy
-        // the Activity while the user switches apps; the foreground service keeps the
-        // keyboard session alive until the user explicitly taps Unregister.
+
         super.onDestroy()
     }
 
     companion object {
         @Volatile private var keyboardRegistered = false
+        @Volatile private var linkState = 0
         private const val REQUEST_BLUETOOTH = 100
         private const val REQUEST_ADVERTISE = 101
         private val KEYBOARD_DESCRIPTOR = intArrayOf(
@@ -722,5 +817,39 @@ class MainActivity : Activity() {
             0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65,
             0x81, 0x00, 0xC0
         ).map { it.toByte() }.toByteArray()
+    }
+}
+
+private val BACKDROP_BASE = Color.rgb(9, 11, 24)
+
+private fun withAlpha(color: Int, alpha: Int): Int = (color and 0x00FFFFFF) or (alpha shl 24)
+
+private fun shiftHue(color: Int, degrees: Float): Int {
+    val hsv = FloatArray(3)
+    Color.colorToHSV(color, hsv)
+    hsv[0] = (hsv[0] + degrees + 360f) % 360f
+    return Color.HSVToColor(hsv)
+}
+
+
+private class GlassBackdrop(context: Context, private val accent: Int) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        canvas.drawColor(BACKDROP_BASE)
+        drawOrb(canvas, w * 0.90f, h * 0.06f, w * 0.85f, accent, 135)
+        drawOrb(canvas, w * 0.00f, h * 0.40f, w * 0.75f, shiftHue(accent, 70f), 95)
+        drawOrb(canvas, w * 0.95f, h * 0.85f, w * 0.90f, shiftHue(accent, -70f), 105)
+    }
+
+    private fun drawOrb(canvas: Canvas, cx: Float, cy: Float, radius: Float, color: Int, alpha: Int) {
+        paint.shader = RadialGradient(
+            cx, cy, radius,
+            intArrayOf(withAlpha(color, alpha), withAlpha(color, 0)),
+            null, Shader.TileMode.CLAMP
+        )
+        canvas.drawCircle(cx, cy, radius, paint)
     }
 }
