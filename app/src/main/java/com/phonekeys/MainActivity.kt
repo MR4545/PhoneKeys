@@ -17,6 +17,8 @@ import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.graphics.drawable.ClipDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
@@ -148,6 +150,7 @@ class MainActivity : Activity() {
         val previousLiveDraft = if (::liveTextInput.isInitialized) liveTextInput.text.toString() else ""
         val previousStatus = if (::statusText.isInitialized) statusText.text.toString() else "Starting PhoneKeys..."
 
+        // Fixed glowing backdrop; the scrolling glass cards float above it.
         val root = FrameLayout(this)
         root.addView(
             GlassBackdrop(this, accentColor),
@@ -155,7 +158,7 @@ class MainActivity : Activity() {
         )
         val page = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(28), dp(20), dp(28))
+            setPadding(dp(20), dp(56), dp(20), dp(28))
         }
         val scroll = ScrollView(this).apply {
             isFillViewport = true
@@ -168,9 +171,10 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
 
+        // ---- Header ----
         page.addView(TextView(this).apply {
             text = "PhoneKeys"
-            textSize = 30f
+            textSize = 36f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             letterSpacing = -0.01f
             setTextColor(Color.WHITE)
@@ -180,42 +184,47 @@ class MainActivity : Activity() {
             textSize = 14f
             setTextColor(textSecondary)
             setPadding(0, dp(4), 0, 0)
-        }, marginParams(bottom = 20))
+        }, marginParams(bottom = 28))
 
-        
-        val statusCard = glassCard(strong = true)
+        // ---- Connection card: live status + register / unregister ----
+        val statusCard = glassCard()
         val statusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         statusDot = View(this)
-        statusRow.addView(statusDot, LinearLayout.LayoutParams(dp(18), dp(18)))
+        statusRow.addView(statusDot, LinearLayout.LayoutParams(dp(44), dp(44)))
+        val statusColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), 0, 0, 0)
+        }
         statusTitle = TextView(this).apply {
-            textSize = 16f
+            textSize = 17f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setTextColor(Color.WHITE)
-            setPadding(dp(10), 0, 0, 0)
         }
-        statusRow.addView(statusTitle)
-        statusCard.addView(statusRow)
+        statusColumn.addView(statusTitle)
         statusText = TextView(this).apply {
             text = previousStatus
             textSize = 13f
             setLineSpacing(0f, 1.15f)
             setTextColor(textSecondary)
-            setPadding(0, dp(8), 0, dp(16))
+            setPadding(0, dp(2), 0, 0)
         }
-        statusCard.addView(statusText)
+        statusColumn.addView(statusText)
+        statusRow.addView(statusColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        statusCard.addView(statusRow)
         val connectRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         connectRow.addView(actionButton("Register keyboard", true) { registerKeyboard() }, weightedParams(1.4f, end = 4))
         connectRow.addView(actionButton("Unregister", false) { unregisterKeyboard() }, weightedParams(1f, start = 4))
-        statusCard.addView(connectRow)
-        page.addView(statusCard, marginParams(bottom = 16))
+        statusCard.addView(connectRow, marginParams(top = 18))
+        page.addView(statusCard, marginParams(bottom = 12))
 
+        // ---- Segmented control: Send text / Live input ----
         val tabBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(4), dp(4), dp(4), dp(4))
-            background = glass(18)
+            background = glass(100)
         }
         pasteTab = tabButton("Send text") { showInputPage(0) }
         liveTab = tabButton("Live input") { showInputPage(1) }
@@ -223,13 +232,15 @@ class MainActivity : Activity() {
         tabBar.addView(liveTab, weightedParams(1f, start = 2))
         page.addView(tabBar, marginParams(bottom = 12))
 
+        // ---- Input card (two pages) ----
         val inputCard = glassCard()
         inputPages = ViewFlipper(this).apply {
             measureAllChildren = true
             setInAnimation(this@MainActivity, android.R.anim.fade_in)
             setOutAnimation(this@MainActivity, android.R.anim.fade_out)
         }
-        
+
+        // PAGE 1: prepare a whole message, then send it explicitly.
         val pastePage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         pastePage.addView(caption("Write or paste a message, review it, then send it all at once.").apply {
             setOnTouchListener(swipeListener())
@@ -248,6 +259,7 @@ class MainActivity : Activity() {
         pastePage.addView(pasteActions, marginParams(top = 12))
         inputPages.addView(pastePage)
 
+        // PAGE 2: every committed character is sent immediately.
         val livePage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         livePage.addView(caption("Type with your normal phone keyboard. Each character is sent to the connected device as you type.").apply {
             setOnTouchListener(swipeListener())
@@ -262,6 +274,10 @@ class MainActivity : Activity() {
             override fun afterTextChanged(s: Editable?) {
                 if (s == null || !liveInputReady || suppressInputWatcher) return
 
+                // Soft keyboards mark provisional words with composing spans while
+                // autocorrect/predictive input is active. Wait until the IME commits
+                // the text; otherwise provisional letters may be sent and then sent
+                // again when the keyboard revises the word.
                 val composingStart = BaseInputConnection.getComposingSpanStart(s)
                 val composingEnd = BaseInputConnection.getComposingSpanEnd(s)
                 if (composingStart >= 0 && composingEnd >= composingStart) return
@@ -298,10 +314,11 @@ class MainActivity : Activity() {
         }, marginParams(top = 12))
         inputPages.addView(livePage)
         inputCard.addView(inputPages)
-        page.addView(inputCard, marginParams(bottom = 16))
+        page.addView(inputCard, marginParams(bottom = 12))
         inputPages.displayedChild = activeInputPage.coerceIn(0, 1)
         liveInputReady = true
 
+        // ---- Typing speed ----
         val speedCard = glassCard()
         val speedTop = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -323,10 +340,10 @@ class MainActivity : Activity() {
         speedCard.addView(speedTop)
         val speedSeek = SeekBar(this).apply {
             max = 175
+            splitTrack = false
+            progressDrawable = seekTrack()
+            thumb = seekThumb()
             progress = (typingIntervalMs.toInt() - 25).coerceIn(0, 175)
-            progressTintList = ColorStateList.valueOf(accentColor)
-            thumbTintList = ColorStateList.valueOf(accentColor)
-            progressBackgroundTintList = ColorStateList.valueOf(Color.argb(70, 255, 255, 255))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     typingIntervalMs = (progress + 25).toLong()
@@ -338,8 +355,9 @@ class MainActivity : Activity() {
         }
         speedCard.addView(speedSeek, marginParams(top = 8, bottom = 4))
         speedCard.addView(caption("A shorter delay sends text faster. If the receiving device misses characters, move the slider right.", bottom = 0))
-        page.addView(speedCard, marginParams(bottom = 16))
+        page.addView(speedCard, marginParams(bottom = 12))
 
+        // ---- Accent color ----
         val accentCard = glassCard()
         addSectionTitle(accentCard, "Accent color", "Changes the background glow and highlights.")
         val swatchRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -347,12 +365,7 @@ class MainActivity : Activity() {
             val cell = FrameLayout(this)
             val swatch = View(this).apply {
                 contentDescription = themeNames[index]
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(color)
-                    if (index == selectedTheme) setStroke(dp(3), Color.WHITE)
-                    else setStroke(dp(1), Color.argb(90, 255, 255, 255))
-                }
+                background = swatchDrawable(color, index == selectedTheme)
                 setOnClickListener {
                     if (selectedTheme != index) {
                         selectedTheme = index
@@ -360,7 +373,7 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            cell.addView(swatch, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER))
+            cell.addView(swatch, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER))
             swatchRow.addView(cell, LinearLayout.LayoutParams(0, dp(48), 1f))
         }
         accentCard.addView(swatchRow)
@@ -405,6 +418,10 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Glass UI building blocks
+    // ---------------------------------------------------------------------
+
     private fun speedText(ms: Long): String {
         val label = when {
             ms <= 35 -> "Very fast"
@@ -415,23 +432,23 @@ class MainActivity : Activity() {
         return "$label, $ms ms"
     }
 
-    /** Translucent frosted panel: diagonal white sheen plus a hairline light border. */
+    /** Translucent frosted panel in the One UI style: soft, nearly flat, very faint edge. */
     private fun glass(radiusDp: Int, strong: Boolean = false): GradientDrawable =
         GradientDrawable(
-            GradientDrawable.Orientation.TL_BR,
+            GradientDrawable.Orientation.TOP_BOTTOM,
             intArrayOf(
-                Color.argb(if (strong) 58 else 42, 255, 255, 255),
-                Color.argb(if (strong) 24 else 14, 255, 255, 255)
+                Color.argb(if (strong) 56 else 40, 255, 255, 255),
+                Color.argb(if (strong) 34 else 24, 255, 255, 255)
             )
         ).apply {
             cornerRadius = dp(radiusDp).toFloat()
-            setStroke(dp(1), Color.argb(if (strong) 95 else 62, 255, 255, 255))
+            setStroke(dp(1), Color.argb(if (strong) 50 else 32, 255, 255, 255))
         }
 
     private fun glassCard(strong: Boolean = false): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(18), dp(18), dp(18), dp(18))
-        background = glass(24, strong)
+        setPadding(dp(20), dp(20), dp(20), dp(20))
+        background = glass(28, strong)
     }
 
     private fun withRipple(content: GradientDrawable, radiusDp: Int): RippleDrawable {
@@ -451,9 +468,9 @@ class MainActivity : Activity() {
     }
 
     private fun fieldBackground(focused: Boolean): GradientDrawable = GradientDrawable().apply {
-        setColor(Color.argb(95, 6, 8, 20))
-        cornerRadius = dp(16).toFloat()
-        setStroke(dp(1), if (focused) withAlpha(accentColor, 210) else Color.argb(50, 255, 255, 255))
+        setColor(Color.argb(85, 4, 6, 16))
+        cornerRadius = dp(20).toFloat()
+        setStroke(dp(1), if (focused) withAlpha(accentColor, 210) else Color.argb(22, 255, 255, 255))
     }
 
     private fun inputField(hintText: String): EditText = EditText(this).apply {
@@ -465,7 +482,7 @@ class MainActivity : Activity() {
         maxLines = 9
         gravity = Gravity.TOP or Gravity.START
         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-        setPadding(dp(16), dp(14), dp(16), dp(14))
+        setPadding(dp(18), dp(16), dp(18), dp(16))
         background = fieldBackground(false)
         setOnFocusChangeListener { v, hasFocus -> v.background = fieldBackground(hasFocus) }
     }
@@ -486,21 +503,21 @@ class MainActivity : Activity() {
     }
 
     private fun actionButton(label: String, primary: Boolean, action: () -> Unit): Button {
-        val radius = 16
+        val radius = 100 // clamps to a full pill
         val face: GradientDrawable = if (primary) {
-            GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(blendWithWhite(accentColor, 0.22f), accentColor)
-            ).apply { cornerRadius = dp(radius).toFloat() }
+            GradientDrawable().apply {
+                setColor(accentColor)
+                cornerRadius = dp(radius).toFloat()
+            }
         } else glass(radius)
         return Button(this).apply {
             text = label
             isAllCaps = false
-            textSize = 14f
+            textSize = 15f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(if (primary) Color.rgb(8, 12, 24) else Color.argb(235, 255, 255, 255))
+            setTextColor(if (primary) Color.rgb(8, 12, 24) else Color.argb(240, 255, 255, 255))
             background = withRipple(face, radius)
-            minHeight = dp(50)
+            minHeight = dp(52)
             stateListAnimator = null
             setPadding(dp(14), dp(10), dp(14), dp(10))
             setOnClickListener { action() }
@@ -520,15 +537,10 @@ class MainActivity : Activity() {
 
     private fun styleTab(button: Button, selected: Boolean) {
         val face = GradientDrawable().apply {
-            cornerRadius = dp(14).toFloat()
-            if (selected) {
-                setColor(withAlpha(accentColor, 75))
-                setStroke(dp(1), withAlpha(accentColor, 160))
-            } else {
-                setColor(Color.TRANSPARENT)
-            }
+            cornerRadius = dp(100).toFloat()
+            setColor(if (selected) Color.argb(70, 255, 255, 255) else Color.TRANSPARENT)
         }
-        button.background = withRipple(face, 14)
+        button.background = withRipple(face, 100)
         button.setTextColor(if (selected) Color.WHITE else textSecondary)
     }
 
@@ -537,6 +549,7 @@ class MainActivity : Activity() {
         styleTab(pasteTab, activeInputPage == 0)
         styleTab(liveTab, activeInputPage == 1)
     }
+
 
     private fun setLinkState(state: Int) {
         linkState = state
@@ -548,11 +561,50 @@ class MainActivity : Activity() {
             else -> "Not registered" to Color.rgb(150, 160, 185)
         }
         statusTitle.text = title
-        val glow = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(withAlpha(color, 75)) }
+        val glow = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(withAlpha(color, 55)) }
         val core = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(color) }
         statusDot.background = LayerDrawable(arrayOf(glow, core)).apply {
-            setLayerInset(1, dp(4), dp(4), dp(4), dp(4))
+            setLayerInset(1, dp(15), dp(15), dp(15), dp(15))
         }
+    }
+
+    private fun seekTrack(): LayerDrawable {
+        val track = GradientDrawable().apply {
+            setColor(Color.argb(60, 255, 255, 255))
+            cornerRadius = dp(4).toFloat()
+            setSize(-1, dp(8))
+        }
+        val fill = ClipDrawable(
+            GradientDrawable().apply {
+                setColor(accentColor)
+                cornerRadius = dp(4).toFloat()
+                setSize(-1, dp(8))
+            },
+            Gravity.START, ClipDrawable.HORIZONTAL
+        )
+        return LayerDrawable(arrayOf<Drawable>(track, fill)).apply {
+            setId(0, android.R.id.background)
+            setId(1, android.R.id.progress)
+        }
+    }
+
+    private fun seekThumb(): GradientDrawable = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(Color.WHITE)
+        setSize(dp(26), dp(26))
+    }
+
+    private fun swatchDrawable(color: Int, selected: Boolean): Drawable {
+        val ring = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.TRANSPARENT)
+            if (selected) setStroke(dp(2), Color.WHITE)
+        }
+        val dot = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color)
+        }
+        return LayerDrawable(arrayOf(ring, dot)).apply { setLayerInset(1, dp(5), dp(5), dp(5), dp(5)) }
     }
 
     private fun blendWithWhite(color: Int, fraction: Float): Int = Color.rgb(
@@ -621,7 +673,6 @@ class MainActivity : Activity() {
             updateStatus("Keyboard unregistered. Background keyboard service stopped.")
         } catch (e: Exception) { updateStatus("Unregister error: ${e.message}") }
     }
-
 
     private fun sendSpecial(keyCode: Int, modifier: Int = 0) {
         enqueueLiveKey(keyCode, modifier)
@@ -749,6 +800,7 @@ class MainActivity : Activity() {
     }
 
     private fun requestHostDiscoverability() {
+  
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE), REQUEST_ADVERTISE)
@@ -763,6 +815,7 @@ class MainActivity : Activity() {
             updateStatus("Keyboard registered. If PhoneKeys isn't visible, open Bluetooth settings and enable visibility.")
         }
     }
+
 
     private fun keyForCharacter(ch: Char): Pair<Int, Boolean>? {
         if (ch in 'a'..'z') return Pair(0x04 + (ch - 'a'), false)
@@ -820,7 +873,8 @@ class MainActivity : Activity() {
     }
 }
 
-private val BACKDROP_BASE = Color.rgb(9, 11, 24)
+
+private val BACKDROP_BASE = Color.rgb(8, 10, 18)
 
 private fun withAlpha(color: Int, alpha: Int): Int = (color and 0x00FFFFFF) or (alpha shl 24)
 
@@ -831,7 +885,6 @@ private fun shiftHue(color: Int, degrees: Float): Int {
     return Color.HSVToColor(hsv)
 }
 
-
 private class GlassBackdrop(context: Context, private val accent: Int) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
@@ -839,9 +892,9 @@ private class GlassBackdrop(context: Context, private val accent: Int) : View(co
         val w = width.toFloat()
         val h = height.toFloat()
         canvas.drawColor(BACKDROP_BASE)
-        drawOrb(canvas, w * 0.90f, h * 0.06f, w * 0.85f, accent, 135)
-        drawOrb(canvas, w * 0.00f, h * 0.40f, w * 0.75f, shiftHue(accent, 70f), 95)
-        drawOrb(canvas, w * 0.95f, h * 0.85f, w * 0.90f, shiftHue(accent, -70f), 105)
+        drawOrb(canvas, w * 0.85f, h * 0.08f, w * 1.00f, accent, 115)
+        drawOrb(canvas, w * 0.05f, h * 0.45f, w * 0.90f, shiftHue(accent, 60f), 80)
+        drawOrb(canvas, w * 0.90f, h * 0.88f, w * 1.00f, shiftHue(accent, -60f), 90)
     }
 
     private fun drawOrb(canvas: Canvas, cx: Float, cy: Float, radius: Float, color: Int, alpha: Int) {
