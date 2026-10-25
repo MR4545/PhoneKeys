@@ -899,9 +899,9 @@ class MainActivity : Activity() {
 // Frosted glass rendering
 // ---------------------------------------------------------------------------
 
-private val SCENE_TOP = Color.rgb(14, 10, 46)
-private val SCENE_MID = Color.rgb(10, 12, 40)
-private val SCENE_BOTTOM = Color.rgb(6, 8, 24)
+private val SCENE_TOP = Color.rgb(10, 6, 34)
+private val SCENE_MID = Color.rgb(6, 7, 26)
+private val SCENE_BOTTOM = Color.rgb(2, 3, 12)
 
 private fun withAlpha(color: Int, alpha: Int): Int = (color and 0x00FFFFFF) or (alpha shl 24)
 
@@ -929,18 +929,77 @@ private class GlassScene {
 
     private fun paintScene(c: Canvas, w: Float, h: Float) {
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        // Deep-space base
         p.shader = LinearGradient(0f, 0f, w, h, intArrayOf(SCENE_TOP, SCENE_MID, SCENE_BOTTOM), null, Shader.TileMode.CLAMP)
         c.drawRect(0f, 0f, w, h, p)
-        blob(c, p, w * 0.80f, h * 0.15f, w * 0.28f, Color.rgb(110, 80, 240), Color.rgb(230, 70, 150))
-        blob(c, p, w * 0.10f, h * 0.38f, w * 0.24f, Color.rgb(30, 170, 230), Color.rgb(50, 90, 230))
-        blob(c, p, w * 0.90f, h * 0.60f, w * 0.20f, Color.rgb(240, 150, 50), Color.rgb(240, 80, 110))
-        blob(c, p, w * 0.22f, h * 0.84f, w * 0.32f, Color.rgb(130, 80, 230), Color.rgb(30, 180, 200))
-        blob(c, p, w * 0.78f, h * 0.93f, w * 0.15f, Color.rgb(230, 70, 150), Color.rgb(240, 150, 50))
+
+        // Soft nebula clouds
+        nebula(c, p, w * 0.85f, h * 0.12f, w * 0.75f, Color.rgb(140, 70, 235), 130)
+        nebula(c, p, w * 0.05f, h * 0.42f, w * 0.70f, Color.rgb(40, 110, 235), 110)
+        nebula(c, p, w * 0.90f, h * 0.68f, w * 0.60f, Color.rgb(225, 65, 150), 95)
+        nebula(c, p, w * 0.20f, h * 0.90f, w * 0.80f, Color.rgb(90, 60, 220), 120)
+
+        val rnd = java.util.Random(7)
+
+        // Distant background stars
+        p.shader = null
+        repeat(320) {
+            val x = rnd.nextFloat() * w
+            val y = rnd.nextFloat() * h
+            val r = 0.4f + rnd.nextFloat() * 1.1f
+            p.color = Color.argb(70 + rnd.nextInt(150), 255, 255, 255)
+            c.drawCircle(x, y, r, p)
+        }
+
+        // Spiral galaxy, tilted, in the upper right
+        val gx = w * 0.72f
+        val gy = h * 0.22f
+        val gr = w * 0.50f
+        nebula(c, p, gx, gy, gr * 0.55f, Color.rgb(255, 225, 190), 150) // glowing core
+        c.save()
+        c.rotate(-28f, gx, gy)
+        p.shader = null
+        for (arm in 0 until 2) {
+            val armOffset = arm * Math.PI
+            repeat(900) {
+                val t = Math.pow(rnd.nextDouble(), 0.8) // more stars toward the centre
+                val radius = t * gr
+                val angle = armOffset + t * 3.6 + rnd.nextGaussian() * 0.22 * (0.4 + t)
+                val x = gx + (Math.cos(angle) * radius).toFloat()
+                val y = gy + (Math.sin(angle) * radius * 0.42).toFloat()
+                val warm = (1.0 - t).toFloat()
+                p.color = Color.argb(
+                    60 + rnd.nextInt(170),
+                    (170 + 85 * warm).toInt(),
+                    (190 + 45 * warm).toInt(),
+                    255
+                )
+                c.drawCircle(x, y, 0.5f + rnd.nextFloat() * 1.3f, p)
+            }
+        }
+        c.restore()
+
+        // A few bright stars with a glow
+        repeat(14) {
+            val x = rnd.nextFloat() * w
+            val y = rnd.nextFloat() * h
+            val glow = 5f + rnd.nextFloat() * 7f
+            nebula(c, p, x, y, glow * 2.5f, Color.rgb(190, 215, 255), 110)
+            p.shader = null
+            p.color = Color.WHITE
+            c.drawCircle(x, y, 1.2f + rnd.nextFloat() * 0.8f, p)
+        }
     }
 
-    private fun blob(c: Canvas, p: Paint, cx: Float, cy: Float, r: Float, from: Int, to: Int) {
-        p.shader = LinearGradient(cx - r, cy - r, cx + r, cy + r, from, to, Shader.TileMode.CLAMP)
+    private fun nebula(c: Canvas, p: Paint, cx: Float, cy: Float, r: Float, color: Int, alpha: Int) {
+        p.shader = RadialGradient(
+            cx, cy, r,
+            intArrayOf(withAlpha(color, alpha), withAlpha(color, alpha / 3), withAlpha(color, 0)),
+            floatArrayOf(0f, 0.5f, 1f),
+            Shader.TileMode.CLAMP
+        )
         c.drawCircle(cx, cy, r, p)
+        p.shader = null
     }
 }
 
