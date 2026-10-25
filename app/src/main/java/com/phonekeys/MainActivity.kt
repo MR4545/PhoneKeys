@@ -11,7 +11,13 @@ import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.LinearGradient
+import android.graphics.Path
+import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RadialGradient
@@ -66,16 +72,8 @@ class MainActivity : Activity() {
     private lateinit var liveTab: Button
     private var typingIntervalMs = 35L
     private var suppressInputWatcher = false
-    private var selectedTheme = 0
-    private val themeNames = listOf("Cyan", "Violet", "Emerald", "Amber", "Rose")
-    private val themeAccents = listOf(
-        Color.rgb(105, 232, 220),
-        Color.rgb(183, 137, 255),
-        Color.rgb(91, 224, 154),
-        Color.rgb(255, 190, 92),
-        Color.rgb(255, 117, 163)
-    )
-    private val accentColor: Int get() = themeAccents[selectedTheme]
+    private val scene = GlassScene()
+    private val frostedHosts = ArrayList<View>()
     private var isSendingText = false
     private var hidDevice: BluetoothHidDevice? = null
     private var registered = false
@@ -133,8 +131,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = BACKDROP_BASE
-        window.navigationBarColor = BACKDROP_BASE
+        window.statusBarColor = SCENE_TOP
+        window.navigationBarColor = SCENE_BOTTOM
         buildInterface()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
@@ -150,10 +148,11 @@ class MainActivity : Activity() {
         val previousLiveDraft = if (::liveTextInput.isInitialized) liveTextInput.text.toString() else ""
         val previousStatus = if (::statusText.isInitialized) statusText.text.toString() else "Starting PhoneKeys..."
 
-        // Fixed glowing backdrop; the scrolling glass cards float above it.
+        // Fixed colorful backdrop; the scrolling glass cards blur whatever is behind them.
+        frostedHosts.clear()
         val root = FrameLayout(this)
         root.addView(
-            GlassBackdrop(this, accentColor),
+            GlassBackdrop(this, scene),
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
         val page = LinearLayout(this).apply {
@@ -166,6 +165,9 @@ class MainActivity : Activity() {
             overScrollMode = View.OVER_SCROLL_NEVER
         }
         scroll.addView(page)
+        // The frosted panels sample the backdrop by position, so redraw them when anything moves.
+        scroll.setOnScrollChangeListener { _, _, _, _, _ -> frostedHosts.forEach { it.invalidate() } }
+        root.viewTreeObserver.addOnGlobalLayoutListener { frostedHosts.forEach { it.invalidate() } }
         root.addView(
             scroll,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -224,7 +226,7 @@ class MainActivity : Activity() {
         val tabBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(4), dp(4), dp(4), dp(4))
-            background = glass(100)
+            frost(this, 100)
         }
         pasteTab = tabButton("Send text") { showInputPage(0) }
         liveTab = tabButton("Live input") { showInputPage(1) }
@@ -334,7 +336,7 @@ class MainActivity : Activity() {
             text = speedText(typingIntervalMs)
             textSize = 13f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(accentColor)
+            setTextColor(Color.argb(210, 255, 255, 255))
         }
         speedTop.addView(speedLabel)
         speedCard.addView(speedTop)
@@ -355,29 +357,7 @@ class MainActivity : Activity() {
         }
         speedCard.addView(speedSeek, marginParams(top = 8, bottom = 4))
         speedCard.addView(caption("A shorter delay sends text faster. If the receiving device misses characters, move the slider right.", bottom = 0))
-        page.addView(speedCard, marginParams(bottom = 12))
-
-        // ---- Accent color ----
-        val accentCard = glassCard()
-        addSectionTitle(accentCard, "Accent color", "Changes the background glow and highlights.")
-        val swatchRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        themeAccents.forEachIndexed { index, color ->
-            val cell = FrameLayout(this)
-            val swatch = View(this).apply {
-                contentDescription = themeNames[index]
-                background = swatchDrawable(color, index == selectedTheme)
-                setOnClickListener {
-                    if (selectedTheme != index) {
-                        selectedTheme = index
-                        buildInterface()
-                    }
-                }
-            }
-            cell.addView(swatch, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER))
-            swatchRow.addView(cell, LinearLayout.LayoutParams(0, dp(48), 1f))
-        }
-        accentCard.addView(swatchRow)
-        page.addView(accentCard, marginParams(bottom = 18))
+        page.addView(speedCard, marginParams(bottom = 18))
 
         page.addView(TextView(this).apply {
             text = "Basic Bluetooth keyboards can't type emoji or most non-ASCII characters. Unsupported characters are skipped."
@@ -432,23 +412,29 @@ class MainActivity : Activity() {
         return "$label, $ms ms"
     }
 
-    /** Translucent frosted panel in the One UI style: soft, nearly flat, very faint edge. */
+    /** Plain translucent glass for small elements that sit on top of a frosted card. */
     private fun glass(radiusDp: Int, strong: Boolean = false): GradientDrawable =
         GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
             intArrayOf(
-                Color.argb(if (strong) 56 else 40, 255, 255, 255),
-                Color.argb(if (strong) 34 else 24, 255, 255, 255)
+                Color.argb(if (strong) 92 else 34, 255, 255, 255),
+                Color.argb(if (strong) 58 else 16, 255, 255, 255)
             )
         ).apply {
             cornerRadius = dp(radiusDp).toFloat()
-            setStroke(dp(1), Color.argb(if (strong) 50 else 32, 255, 255, 255))
+            setStroke(dp(1), Color.argb(if (strong) 140 else 56, 255, 255, 255))
         }
 
-    private fun glassCard(strong: Boolean = false): LinearLayout = LinearLayout(this).apply {
+    /** Gives a view real frosted-glass background: a blurred copy of the backdrop, tinted and edge-lit. */
+    private fun frost(view: View, radiusDp: Int) {
+        view.background = FrostedDrawable(view, scene, dp(radiusDp).toFloat())
+        frostedHosts.add(view)
+    }
+
+    private fun glassCard(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(20), dp(20), dp(20), dp(20))
-        background = glass(28, strong)
+        frost(this, 28)
     }
 
     private fun withRipple(content: GradientDrawable, radiusDp: Int): RippleDrawable {
@@ -468,9 +454,9 @@ class MainActivity : Activity() {
     }
 
     private fun fieldBackground(focused: Boolean): GradientDrawable = GradientDrawable().apply {
-        setColor(Color.argb(85, 4, 6, 16))
+        setColor(Color.argb(72, 4, 6, 18))
         cornerRadius = dp(20).toFloat()
-        setStroke(dp(1), if (focused) withAlpha(accentColor, 210) else Color.argb(22, 255, 255, 255))
+        setStroke(dp(1), if (focused) Color.argb(175, 255, 255, 255) else Color.argb(40, 255, 255, 255))
     }
 
     private fun inputField(hintText: String): EditText = EditText(this).apply {
@@ -504,19 +490,13 @@ class MainActivity : Activity() {
 
     private fun actionButton(label: String, primary: Boolean, action: () -> Unit): Button {
         val radius = 100 // clamps to a full pill
-        val face: GradientDrawable = if (primary) {
-            GradientDrawable().apply {
-                setColor(accentColor)
-                cornerRadius = dp(radius).toFloat()
-            }
-        } else glass(radius)
         return Button(this).apply {
             text = label
             isAllCaps = false
             textSize = 15f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(if (primary) Color.rgb(8, 12, 24) else Color.argb(240, 255, 255, 255))
-            background = withRipple(face, radius)
+            setTextColor(if (primary) Color.WHITE else Color.argb(220, 255, 255, 255))
+            background = withRipple(glass(radius, strong = primary), radius)
             minHeight = dp(52)
             stateListAnimator = null
             setPadding(dp(14), dp(10), dp(14), dp(10))
@@ -538,7 +518,12 @@ class MainActivity : Activity() {
     private fun styleTab(button: Button, selected: Boolean) {
         val face = GradientDrawable().apply {
             cornerRadius = dp(100).toFloat()
-            setColor(if (selected) Color.argb(70, 255, 255, 255) else Color.TRANSPARENT)
+            if (selected) {
+                setColor(Color.argb(66, 255, 255, 255))
+                setStroke(dp(1), Color.argb(110, 255, 255, 255))
+            } else {
+                setColor(Color.TRANSPARENT)
+            }
         }
         button.background = withRipple(face, 100)
         button.setTextColor(if (selected) Color.WHITE else textSecondary)
@@ -550,7 +535,7 @@ class MainActivity : Activity() {
         styleTab(liveTab, activeInputPage == 1)
     }
 
-
+    /** 0 = not registered, 1 = ready to pair, 2 = connecting, 3 = connected. */
     private fun setLinkState(state: Int) {
         linkState = state
         if (!::statusDot.isInitialized || !::statusTitle.isInitialized) return
@@ -570,13 +555,13 @@ class MainActivity : Activity() {
 
     private fun seekTrack(): LayerDrawable {
         val track = GradientDrawable().apply {
-            setColor(Color.argb(60, 255, 255, 255))
+            setColor(Color.argb(55, 255, 255, 255))
             cornerRadius = dp(4).toFloat()
             setSize(-1, dp(8))
         }
         val fill = ClipDrawable(
             GradientDrawable().apply {
-                setColor(accentColor)
+                setColor(Color.argb(235, 255, 255, 255))
                 cornerRadius = dp(4).toFloat()
                 setSize(-1, dp(8))
             },
@@ -594,315 +579,135 @@ class MainActivity : Activity() {
         setSize(dp(26), dp(26))
     }
 
-    private fun swatchDrawable(color: Int, selected: Boolean): Drawable {
-        val ring = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(Color.TRANSPARENT)
-            if (selected) setStroke(dp(2), Color.WHITE)
-        }
-        val dot = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color)
-        }
-        return LayerDrawable(arrayOf(ring, dot)).apply { setLayerInset(1, dp(5), dp(5), dp(5), dp(5)) }
-    }
 
-    private fun blendWithWhite(color: Int, fraction: Float): Int = Color.rgb(
-        (Color.red(color) + (255 - Color.red(color)) * fraction).toInt(),
-        (Color.green(color) + (255 - Color.green(color)) * fraction).toInt(),
-        (Color.blue(color) + (255 - Color.blue(color)) * fraction).toInt()
-    )
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun marginParams(top: Int = 0, bottom: Int = 0): LinearLayout.LayoutParams =
-        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            setMargins(0, dp(top), 0, dp(bottom))
-        }
-
-    private fun weightedParams(weight: Float, start: Int = 0, end: Int = 0): LinearLayout.LayoutParams =
-        LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight).apply {
-            setMargins(dp(start), 0, dp(end), 0)
-        }
-
-    private fun initializeBluetooth() {
-        try {
-            val manager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
-            val adapter: BluetoothAdapter? = manager.adapter
-            if (adapter == null) { updateStatus("This device has no Bluetooth adapter."); return }
-            if (!adapter.isEnabled) { updateStatus("Turn on Bluetooth in Android Settings."); return }
-            val success = adapter.getProfileProxy(this, profileListener, BluetoothProfile.HID_DEVICE)
-            updateStatus(if (success) "Requesting Bluetooth HID service..." else "Could not request the HID service.")
-        } catch (e: SecurityException) { updateStatus("Bluetooth permission is required.") }
-        catch (e: Exception) { updateStatus("Bluetooth error: ${e.message}") }
-    }
-
-    private fun registerKeyboard() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE), REQUEST_BLUETOOTH); return
-        }
-        val hid = hidDevice
-        if (hid == null) { updateStatus("HID service is not ready. Restart the app."); return }
-        try {
-            startKeyboardForegroundService()
-            val settings = BluetoothHidDeviceAppSdpSettings("PhoneKeys", "PhoneKeys Bluetooth Keyboard", "PhoneKeys", BluetoothHidDevice.SUBCLASS1_KEYBOARD, KEYBOARD_DESCRIPTOR)
-            val executor = Executor { command -> runOnUiThread { command.run() } }
-            val accepted = hid.registerApp(settings, null, null, executor, callback)
-            updateStatus(if (accepted) "Registration requested. Waiting for Android..." else "Android rejected the registration request.")
-        } catch (e: SecurityException) { updateStatus("Bluetooth permission denied.") }
-        catch (e: Exception) { updateStatus("Registration error: ${e.message}") }
-    }
-
-    private fun startKeyboardForegroundService() {
-        try {
-            val intent = android.content.Intent(this, KeyboardKeepAliveService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
-        } catch (e: Exception) {
-            updateStatus("Could not start background keyboard service: ${e.message}")
-        }
-    }
-
-    private fun unregisterKeyboard() {
-        try {
-            val hid = hidDevice ?: run { updateStatus("HID service is not ready."); return }
-            hid.unregisterApp()
-            registered = false
-            keyboardRegistered = false
-            setLinkState(0)
-            stopService(android.content.Intent(this, KeyboardKeepAliveService::class.java))
-            updateStatus("Keyboard unregistered. Background keyboard service stopped.")
-        } catch (e: Exception) { updateStatus("Unregister error: ${e.message}") }
-    }
-
-    private fun sendSpecial(keyCode: Int, modifier: Int = 0) {
-        enqueueLiveKey(keyCode, modifier)
-    }
-
-    private fun sendCharacter(character: Char) {
-        val pair = keyForCharacter(character)
-        if (pair == null) {
-            updateStatus("Character '$character' is not supported by the basic keyboard layout.")
-            return
-        }
-        enqueueLiveKey(pair.first, if (pair.second) 0x02 else 0)
-    }
-
-    private fun enqueueLiveKey(keyCode: Int, modifier: Int = 0) {
-        if (getConnectedHost() == null) return
-        liveKeyQueue.addLast(QueuedKey(keyCode, modifier))
-        drainLiveKeyQueue()
-    }
-
-    private fun drainLiveKeyQueue() {
-        if (liveKeySending) return
-        if (liveKeyQueue.isEmpty()) {
-            if (isSendingText) {
-                isSendingText = false
-                updateStatus(if (pendingSkippedCharacters > 0) {
-                    "Finished sending text. Skipped $pendingSkippedCharacters unsupported character(s)."
-                } else "Finished sending text!")
-                pendingSkippedCharacters = 0
-            }
-            return
-        }
-        val target = getConnectedHost() ?: run { liveKeyQueue.clear(); isSendingText = false; return }
-        val hid = hidDevice ?: run { liveKeyQueue.clear(); isSendingText = false; return }
-        val key = liveKeyQueue.removeFirst()
-        liveKeySending = true
-        try {
-            val pressed = byteArrayOf(key.modifier.toByte(), 0, key.keyCode.toByte(), 0, 0, 0, 0, 0)
-            if (!hid.sendReport(target, 0, pressed)) {
-                updateStatus("Host rejected a key report. Reconnect or try a slower speed.")
-            }
-            val interval = typingIntervalMs.coerceAtLeast(25L)
-            val releaseDelay = minOf(18L, interval - 2L).coerceAtLeast(8L)
-            mainHandler.postDelayed({
-                try { hid.sendReport(target, 0, ByteArray(8)) }
-                catch (_: Exception) { updateStatus("Could not release a key. Reconnect and retry.") }
-                mainHandler.postDelayed({
-                    liveKeySending = false
-                    drainLiveKeyQueue()
-                }, (interval - releaseDelay).coerceAtLeast(1L))
-            }, releaseDelay)
-        } catch (e: SecurityException) {
-            liveKeySending = false
-            updateStatus("Bluetooth permission denied.")
-        } catch (e: Exception) {
-            liveKeySending = false
-            updateStatus("Keyboard send error: ${e.message}")
-        }
-    }
-
-    private fun sendReportStroke(keyCode: Int, modifier: Int = 0, delayMs: Long = 55L) {
-        val target = getConnectedHost() ?: return
-        try {
-            val hid = hidDevice ?: return
-            val pressed = byteArrayOf(modifier.toByte(), 0, keyCode.toByte(), 0, 0, 0, 0, 0)
-            val released = ByteArray(8)
-            if (!hid.sendReport(target, 0, pressed)) { updateStatus("Android could not send the key."); return }
-            mainHandler.postDelayed({ try { hid.sendReport(target, 0, released) } catch (_: Exception) { updateStatus("Key release failed. Reconnect and retry.") } }, delayMs)
-        } catch (e: SecurityException) { updateStatus("Bluetooth permission denied.") }
-        catch (e: Exception) { updateStatus("Send error: ${e.message}") }
-    }
-
-    private fun sendText(text: String) {
-        if (text.isEmpty()) { updateStatus("Type or paste some text first."); return }
-        if (isSendingText) { updateStatus("Text is already being sent. Wait for it to finish."); return }
-        if (getConnectedHost() == null) return
-
-        val supported = ArrayList<QueuedKey>()
-        var skipped = 0
-        text.forEach { ch ->
-            when (ch) {
-                '\n', '\r' -> supported.add(QueuedKey(0x28, 0))
-                '\t' -> supported.add(QueuedKey(0x2B, 0))
-                else -> {
-                    val pair = keyForCharacter(ch)
-                    if (pair == null) skipped++
-                    else supported.add(QueuedKey(pair.first, if (pair.second) 0x02 else 0))
-                }
-            }
-        }
-        if (supported.isEmpty()) { updateStatus("No supported characters found."); return }
-
-        isSendingText = true
-        pendingSkippedCharacters = skipped
-        liveKeyQueue.addAll(supported)
-        updateStatus("Sending ${supported.size} keystrokes to the connected host · ${typingIntervalMs} ms interval…")
-        if (skipped > 0) {
-            mainHandler.postDelayed({
-                if (isSendingText) updateStatus("Sending text; $skipped unsupported emoji/Unicode character(s) will be skipped.")
-            }, 500L)
-        }
-        drainLiveKeyQueue()
-    }
-
-    private fun getConnectedHost(): BluetoothDevice? {
-        try {
-            val hid = hidDevice
-            if (hid == null || !registered) {
-                updateStatus("Register the PhoneKeys keyboard first, then connect a computer or compatible Android phone.")
-                return null
-            }
-            val host = hid.connectedDevices.firstOrNull()
-            if (host == null) {
-                updateStatus("No connected host. In the other device's Bluetooth settings, connect to PhoneKeys or this phone's advertised keyboard service.")
-                return null
-            }
-            return host
-        } catch (e: SecurityException) {
-            updateStatus("Bluetooth permission denied.")
-            return null
-        } catch (e: Exception) {
-            updateStatus("Could not check Bluetooth host: ${e.message}")
-            return null
-        }
-    }
-
-    private fun requestHostDiscoverability() {
-  
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE), REQUEST_ADVERTISE)
-            return
-        }
-        try {
-            val intent = android.content.Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
-                putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
-            }
-            startActivity(intent)
-        } catch (e: Exception) {
-            updateStatus("Keyboard registered. If PhoneKeys isn't visible, open Bluetooth settings and enable visibility.")
-        }
-    }
-
-
-    private fun keyForCharacter(ch: Char): Pair<Int, Boolean>? {
-        if (ch in 'a'..'z') return Pair(0x04 + (ch - 'a'), false)
-        if (ch in 'A'..'Z') return Pair(0x04 + (ch - 'A'), true)
-        if (ch in '1'..'9') return Pair(0x1E + (ch - '1'), false)
-        if (ch == '0') return Pair(0x27, false)
-        return when (ch) {
-            ' ' -> Pair(0x2C, false)
-            '!' -> Pair(0x1E, true); '@' -> Pair(0x1F, true); '#' -> Pair(0x20, true); '$' -> Pair(0x21, true)
-            '%' -> Pair(0x22, true); '^' -> Pair(0x23, true); '&' -> Pair(0x24, true); '*' -> Pair(0x25, true)
-            '(' -> Pair(0x26, true); ')' -> Pair(0x27, true); '-' -> Pair(0x2D, false); '_' -> Pair(0x2D, true)
-            '=' -> Pair(0x2E, false); '+' -> Pair(0x2E, true); '[' -> Pair(0x2F, false); '{' -> Pair(0x2F, true)
-            ']' -> Pair(0x30, false); '}' -> Pair(0x30, true); '\\' -> Pair(0x31, false); '|' -> Pair(0x31, true)
-            ';' -> Pair(0x33, false); ':' -> Pair(0x33, true); '\'' -> Pair(0x34, false); '"' -> Pair(0x34, true)
-            '`' -> Pair(0x35, false); '~' -> Pair(0x35, true); ',' -> Pair(0x36, false); '<' -> Pair(0x36, true)
-            '.' -> Pair(0x37, false); '>' -> Pair(0x37, true); '/' -> Pair(0x38, false); '?' -> Pair(0x38, true)
-            else -> null
-        }
-    }
-
-    private fun updateStatus(message: String) { if (::statusText.isInitialized) statusText.text = message }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_BLUETOOTH) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) initializeBluetooth()
-            else updateStatus("Bluetooth permission was not granted.")
-        } else if (requestCode == REQUEST_ADVERTISE) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) requestHostDiscoverability()
-            else updateStatus("Keyboard registered. Enable Bluetooth visibility manually if the other phone cannot find this device.")
-        }
-    }
-
-    override fun onDestroy() {
-
-        super.onDestroy()
-    }
-
-    companion object {
-        @Volatile private var keyboardRegistered = false
-        @Volatile private var linkState = 0
-        private const val REQUEST_BLUETOOTH = 100
-        private const val REQUEST_ADVERTISE = 101
-        private val KEYBOARD_DESCRIPTOR = intArrayOf(
-            0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
-            0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,
-            0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
-            0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01,
-            0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01,
-            0x29, 0x05, 0x91, 0x02, 0x95, 0x01, 0x75, 0x03,
-            0x91, 0x01, 0x95, 0x06, 0x75, 0x08, 0x15, 0x00,
-            0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65,
-            0x81, 0x00, 0xC0
-        ).map { it.toByte() }.toByteArray()
-    }
 }
 
+// ---------------------------------------------------------------------------
+// Frosted glass rendering
+// ---------------------------------------------------------------------------
 
-private val BACKDROP_BASE = Color.rgb(8, 10, 18)
+private val SCENE_TOP = Color.rgb(14, 10, 46)
+private val SCENE_MID = Color.rgb(10, 12, 40)
+private val SCENE_BOTTOM = Color.rgb(6, 8, 24)
 
 private fun withAlpha(color: Int, alpha: Int): Int = (color and 0x00FFFFFF) or (alpha shl 24)
 
-private fun shiftHue(color: Int, degrees: Float): Int {
-    val hsv = FloatArray(3)
-    Color.colorToHSV(color, hsv)
-    hsv[0] = (hsv[0] + degrees + 360f) % 360f
-    return Color.HSVToColor(hsv)
+/**
+ * The vivid scene behind the UI, plus a heavily blurred copy of it. Every frosted panel
+ * draws the matching part of the blurred copy, which is what makes it look like real glass.
+ */
+private class GlassScene {
+    var anchor: View? = null
+    var sharp: Bitmap? = null
+    var blurred: Bitmap? = null
+
+    fun build(w: Int, h: Int) {
+        if (w <= 0 || h <= 0) return
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        paintScene(Canvas(bmp), w.toFloat(), h.toFloat())
+        sharp = bmp
+
+        // Cheap, device-independent blur: repeatedly halve, then repeatedly double with filtering.
+        var cur = bmp
+        repeat(5) { cur = Bitmap.createScaledBitmap(cur, maxOf(1, cur.width / 2), maxOf(1, cur.height / 2), true) }
+        repeat(5) { cur = Bitmap.createScaledBitmap(cur, cur.width * 2, cur.height * 2, true) }
+        blurred = if (cur.width == w && cur.height == h) cur else Bitmap.createScaledBitmap(cur, w, h, true)
+    }
+
+    private fun paintScene(c: Canvas, w: Float, h: Float) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.shader = LinearGradient(0f, 0f, w, h, intArrayOf(SCENE_TOP, SCENE_MID, SCENE_BOTTOM), null, Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, w, h, p)
+        blob(c, p, w * 0.80f, h * 0.15f, w * 0.28f, Color.rgb(110, 80, 240), Color.rgb(230, 70, 150))
+        blob(c, p, w * 0.10f, h * 0.38f, w * 0.24f, Color.rgb(30, 170, 230), Color.rgb(50, 90, 230))
+        blob(c, p, w * 0.90f, h * 0.60f, w * 0.20f, Color.rgb(240, 150, 50), Color.rgb(240, 80, 110))
+        blob(c, p, w * 0.22f, h * 0.84f, w * 0.32f, Color.rgb(130, 80, 230), Color.rgb(30, 180, 200))
+        blob(c, p, w * 0.78f, h * 0.93f, w * 0.15f, Color.rgb(230, 70, 150), Color.rgb(240, 150, 50))
+    }
+
+    private fun blob(c: Canvas, p: Paint, cx: Float, cy: Float, r: Float, from: Int, to: Int) {
+        p.shader = LinearGradient(cx - r, cy - r, cx + r, cy + r, from, to, Shader.TileMode.CLAMP)
+        c.drawCircle(cx, cy, r, p)
+    }
 }
 
-private class GlassBackdrop(context: Context, private val accent: Int) : View(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+/** Full-screen view that shows the sharp scene. */
+private class GlassBackdrop(context: Context, private val scene: GlassScene) : View(context) {
+    init { scene.anchor = this }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        scene.build(w, h)
+    }
 
     override fun onDraw(canvas: Canvas) {
-        val w = width.toFloat()
-        val h = height.toFloat()
-        canvas.drawColor(BACKDROP_BASE)
-        drawOrb(canvas, w * 0.85f, h * 0.08f, w * 1.00f, accent, 115)
-        drawOrb(canvas, w * 0.05f, h * 0.45f, w * 0.90f, shiftHue(accent, 60f), 80)
-        drawOrb(canvas, w * 0.90f, h * 0.88f, w * 1.00f, shiftHue(accent, -60f), 90)
+        scene.sharp?.let { canvas.drawBitmap(it, 0f, 0f, null) }
+    }
+}
+
+/**
+ * Frosted glass: blurred backdrop clipped to a rounded shape, a smoked tint so white text
+ * stays readable, a soft top sheen, and a light edge that fades from top-left to bottom-right.
+ */
+private class FrostedDrawable(
+    private val host: View,
+    private val scene: GlassScene,
+    private val radius: Float
+) : Drawable() {
+    private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val clip = Path()
+    private val rect = RectF()
+    private val borderRect = RectF()
+    private val hostPos = IntArray(2)
+    private val anchorPos = IntArray(2)
+    private val edge = host.resources.displayMetrics.density
+
+    override fun draw(canvas: Canvas) {
+        val b = bounds
+        if (b.width() <= 0 || b.height() <= 0) return
+        rect.set(b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), b.bottom.toFloat())
+        clip.reset()
+        clip.addRoundRect(rect, radius, radius, Path.Direction.CW)
+
+        val saved = canvas.save()
+        canvas.clipPath(clip)
+
+        val blurred = scene.blurred
+        val anchor = scene.anchor
+        if (blurred != null && anchor != null) {
+            host.getLocationInWindow(hostPos)
+            anchor.getLocationInWindow(anchorPos)
+            canvas.drawBitmap(
+                blurred,
+                (anchorPos[0] - hostPos[0]).toFloat(),
+                (anchorPos[1] - hostPos[1]).toFloat(),
+                bitmapPaint
+            )
+        }
+        canvas.drawColor(Color.argb(100, 6, 8, 24))
+        sheenPaint.shader = LinearGradient(
+            0f, rect.top, 0f, rect.bottom,
+            Color.argb(48, 255, 255, 255), Color.argb(14, 255, 255, 255), Shader.TileMode.CLAMP
+        )
+        canvas.drawRect(rect, sheenPaint)
+        canvas.restoreToCount(saved)
+
+        borderRect.set(rect)
+        borderRect.inset(edge / 2f, edge / 2f)
+        borderPaint.strokeWidth = edge
+        borderPaint.shader = LinearGradient(
+            rect.left, rect.top, rect.right, rect.bottom,
+            Color.argb(150, 255, 255, 255), Color.argb(26, 255, 255, 255), Shader.TileMode.CLAMP
+        )
+        canvas.drawRoundRect(borderRect, radius - edge / 2f, radius - edge / 2f, borderPaint)
     }
 
-    private fun drawOrb(canvas: Canvas, cx: Float, cy: Float, radius: Float, color: Int, alpha: Int) {
-        paint.shader = RadialGradient(
-            cx, cy, radius,
-            intArrayOf(withAlpha(color, alpha), withAlpha(color, 0)),
-            null, Shader.TileMode.CLAMP
-        )
-        canvas.drawCircle(cx, cy, radius, paint)
-    }
+    override fun setAlpha(alpha: Int) {}
+
+    override fun setColorFilter(colorFilter: ColorFilter?) {}
+
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
 }
