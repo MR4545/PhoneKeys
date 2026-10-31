@@ -59,13 +59,9 @@ class MainActivity : Activity() {
     private lateinit var inputPages: ViewFlipper
     private var activeInputPage = 0
     private var liveInputReady = false
-    // Live input mirrors the receiving device: what it currently holds, where its caret is,
-    // and how many unsupported characters we have already warned about.
     private var liveRemoteText = ""
     private var liveRemoteCursor = 0
     private var liveUnsupportedShown = 0
-    // One ordered queue is shared by live typing and pasted-text sending so HID
-    // key-down/key-up reports can never interleave between the two modes.
     private data class QueuedKey(val keyCode: Int, val modifier: Int)
     private val liveKeyQueue = java.util.ArrayDeque<QueuedKey>()
     private var liveKeySending = false
@@ -76,8 +72,6 @@ class MainActivity : Activity() {
     private lateinit var pasteTab: Button
     private lateinit var liveTab: Button
     private var typingIntervalMs = 35L
-    // When on, every newline is followed by Shift+Home so the receiver's auto-indent is
-    // selected and then overwritten by the indentation that is actually in the pasted text.
     private var codeMode = true
     private var suppressInputWatcher = false
     private val scene = GlassScene()
@@ -156,7 +150,6 @@ class MainActivity : Activity() {
         val previousLiveDraft = if (::liveTextInput.isInitialized) liveTextInput.text.toString() else ""
         val previousStatus = if (::statusText.isInitialized) statusText.text.toString() else "Starting PhoneKeys..."
 
-        // Fixed colorful backdrop; the scrolling glass cards blur whatever is behind them.
         frostedHosts.clear()
         val root = FrameLayout(this)
         root.addView(
@@ -173,7 +166,6 @@ class MainActivity : Activity() {
             overScrollMode = View.OVER_SCROLL_NEVER
         }
         scroll.addView(page)
-        // The frosted panels sample the backdrop by position, so redraw them when anything moves.
         scroll.setOnScrollChangeListener { _, _, _, _, _ -> frostedHosts.forEach { it.invalidate() } }
         root.viewTreeObserver.addOnGlobalLayoutListener { frostedHosts.forEach { it.invalidate() } }
         root.addView(
@@ -196,7 +188,7 @@ class MainActivity : Activity() {
             setPadding(0, dp(4), 0, 0)
         }, marginParams(bottom = 28))
 
-        // ---- Connection card: live status + register / unregister ----
+        // ---- Connection card----
         val statusCard = glassCard()
         val statusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -250,7 +242,7 @@ class MainActivity : Activity() {
             setOutAnimation(this@MainActivity, android.R.anim.fade_out)
         }
 
-        // PAGE 1: prepare a whole message, then send it explicitly.
+        // PAGE 1:
         val pastePage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         pastePage.addView(caption("Write or paste a message, review it, then send it all at once.").apply {
             setOnTouchListener(swipeListener())
@@ -283,7 +275,7 @@ class MainActivity : Activity() {
         pastePage.addView(pasteActions, marginParams(top = 12))
         inputPages.addView(pastePage)
 
-        // PAGE 2: every committed character is sent immediately.
+        // PAGE 2:
         val livePage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         livePage.addView(caption("Type with your normal phone keyboard. Typing, deleting and cursor moves are mirrored on the connected device as you go.").apply {
             setOnTouchListener(swipeListener())
@@ -297,7 +289,7 @@ class MainActivity : Activity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) { syncLiveToRemote() }
         })
-        // Moving the caret (tapping, dragging, space-bar swipe) moves the caret on the other device too.
+        // Moving the caret
         (liveTextInput as? LiveEditText)?.onSelectionChange = { syncLiveToRemote() }
         livePage.addView(liveTextInput, marginParams())
         livePage.addView(actionButton("Clear", false) {
@@ -404,7 +396,6 @@ class MainActivity : Activity() {
         return "$label, $ms ms"
     }
 
-    /** Plain translucent glass for small elements that sit on top of a frosted card. */
     private fun glass(radiusDp: Int, strong: Boolean = false): GradientDrawable =
         GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM,
@@ -416,8 +407,6 @@ class MainActivity : Activity() {
             cornerRadius = dp(radiusDp).toFloat()
             setStroke(dp(1), Color.argb(if (strong) 140 else 56, 255, 255, 255))
         }
-
-    /** Gives a view real frosted-glass background: a blurred copy of the backdrop, tinted and edge-lit. */
     private fun frost(view: View, radiusDp: Int) {
         view.background = FrostedDrawable(view, scene, dp(radiusDp).toFloat())
         frostedHosts.add(view)
@@ -460,7 +449,7 @@ class MainActivity : Activity() {
         maxLines = 9
         gravity = Gravity.TOP or Gravity.START
         inputType = if (live) {
-            // No suggestions or autocorrect: keyboards then commit each letter immediately.
+            
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         } else {
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
@@ -486,7 +475,7 @@ class MainActivity : Activity() {
     }
 
     private fun actionButton(label: String, primary: Boolean, action: () -> Unit): Button {
-        val radius = 100 // clamps to a full pill
+        val radius = 100 
         return Button(this).apply {
             text = label
             isAllCaps = false
@@ -637,7 +626,7 @@ class MainActivity : Activity() {
         } catch (e: Exception) { updateStatus("Unregister error: ${e.message}") }
     }
 
-    // Both Live Input and Send Text use this same ordered HID queue.
+    //HID queue.
     private fun sendSpecial(keyCode: Int, modifier: Int = 0) {
         enqueueLiveKey(keyCode, modifier)
     }
@@ -659,7 +648,6 @@ class MainActivity : Activity() {
 
     private fun isRemoteTypable(ch: Char): Boolean = ch == '\n' || ch == '\t' || keyForCharacter(ch) != null
 
-    /** The text as the receiving device will actually see it: only characters the basic layout can type. */
     private fun remoteForm(text: String): String = text.filter { isRemoteTypable(it) }
 
     private fun typeRemoteChar(ch: Char) {
@@ -679,13 +667,6 @@ class MainActivity : Activity() {
         liveRemoteCursor = clamped
     }
 
-    /**
-     * Makes the receiving device match the live box. Safe to call as often as you like
-     * (every text change and every caret move): it only sends what is actually different.
-     *  1. Text: find the changed range, move the remote caret to its end, backspace the removed
-     *     characters, then type the new ones. This works anywhere in the text, not just at the end.
-     *  2. Caret: if the local caret is somewhere else, press arrows until the remote caret matches.
-     */
     private fun syncLiveToRemote() {
         if (!liveInputReady || suppressInputWatcher || !::liveTextInput.isInitialized) return
         val text = liveTextInput.text?.toString() ?: return
@@ -792,10 +773,10 @@ class MainActivity : Activity() {
             when (ch) {
                 '\n' -> {
                     supported.add(QueuedKey(0x28, 0)) // Enter
-                    // Select whatever auto-indent the receiver inserted so the next characters replace it.
-                    if (codeMode) supported.add(QueuedKey(0x4A, 0x02)) // Shift+Home
+                    
+                    if (codeMode) supported.add(QueuedKey(0x4A, 0x02)) 
                 }
-                '\r' -> {} // CRLF: the '\n' that follows does the work
+                '\r' -> {} 
                 '\t' -> supported.add(QueuedKey(0x2B, 0))
                 else -> {
                     val pair = keyForCharacter(ch)
@@ -804,7 +785,6 @@ class MainActivity : Activity() {
                 }
             }
         }
-        // If the text ends with a newline, drop the leftover selection by jumping to End.
         if (codeMode && text.trimEnd(' ', '\t', '\r').endsWith("\n")) supported.add(QueuedKey(0x4D, 0))
         if (supported.isEmpty()) { updateStatus("No supported characters found."); return }
 
@@ -843,9 +823,6 @@ class MainActivity : Activity() {
     }
 
     private fun requestHostDiscoverability() {
-        // HID registration exposes the keyboard service. Discoverability helps a
-        // nearby phone find this handset during pairing; Android still asks the
-        // user to approve the visibility window.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE), REQUEST_ADVERTISE)
@@ -861,7 +838,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // Returns (HID usage code, requires Shift).
     private fun keyForCharacter(ch: Char): Pair<Int, Boolean>? {
         if (ch in 'a'..'z') return Pair(0x04 + (ch - 'a'), false)
         if (ch in 'A'..'Z') return Pair(0x04 + (ch - 'A'), true)
@@ -894,11 +870,7 @@ class MainActivity : Activity() {
         }
     }
 
-    override fun onDestroy() {
-        // Do not unregister HID or close the profile proxy here. Android can destroy
-        // the Activity while the user switches apps; the foreground service keeps the
-        // keyboard session alive until the user explicitly taps Unregister.
-        super.onDestroy()
+    override fun onDestroy() 
     }
 
     companion object {
@@ -930,10 +902,7 @@ private val SCENE_BOTTOM = Color.rgb(2, 3, 12)
 
 private fun withAlpha(color: Int, alpha: Int): Int = (color and 0x00FFFFFF) or (alpha shl 24)
 
-/**
- * The vivid scene behind the UI, plus a heavily blurred copy of it. Every frosted panel
- * draws the matching part of the blurred copy, which is what makes it look like real glass.
- */
+
 private class GlassScene {
     var anchor: View? = null
     var sharp: Bitmap? = null
@@ -945,7 +914,7 @@ private class GlassScene {
         paintScene(Canvas(bmp), w.toFloat(), h.toFloat())
         sharp = bmp
 
-        // Cheap, device-independent blur: repeatedly halve, then repeatedly double with filtering.
+        
         var cur = bmp
         repeat(5) { cur = Bitmap.createScaledBitmap(cur, maxOf(1, cur.width / 2), maxOf(1, cur.height / 2), true) }
         repeat(5) { cur = Bitmap.createScaledBitmap(cur, cur.width * 2, cur.height * 2, true) }
@@ -1027,8 +996,6 @@ private class GlassScene {
         p.shader = null
     }
 }
-
-/** EditText that reports caret moves, so live input can mirror them on the other device. */
 private class LiveEditText(context: Context) : EditText(context) {
     var onSelectionChange: (() -> Unit)? = null
 
@@ -1038,7 +1005,6 @@ private class LiveEditText(context: Context) : EditText(context) {
     }
 }
 
-/** Full-screen view that shows the sharp scene. */
 private class GlassBackdrop(context: Context, private val scene: GlassScene) : View(context) {
     init { scene.anchor = this }
 
@@ -1052,10 +1018,6 @@ private class GlassBackdrop(context: Context, private val scene: GlassScene) : V
     }
 }
 
-/**
- * Frosted glass: blurred backdrop clipped to a rounded shape, a smoked tint so white text
- * stays readable, a soft top sheen, and a light edge that fades from top-left to bottom-right.
- */
 private class FrostedDrawable(
     private val host: View,
     private val scene: GlassScene,
